@@ -517,7 +517,7 @@ def synthesize_chat_response(query: str, context_text: str) -> tuple[str, str | 
          return "Error: Could not prepare the request for the AI model.", None
 
     try:
-        # logger.info(f"Invoking LLM for chat synthesis (model: {OLLAMA_MODEL})...") # Already logged above
+        # logger.info(f"Invoking LLM for chat synthesis (model: {OLLAMA_MODEL})") # Already logged above
         # Use .invoke() for ChatOllama which returns AIMessage, access content with .content
         response_object = llm.invoke(final_prompt)
         # Ensure response_object has 'content' attribute
@@ -576,7 +576,7 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
 
     if not llm:
         logger.error("LLM not initialized, cannot perform analysis.")
-        return "Error: AI model is not available for analysis.", None
+        return " Error: AI MODEL is not available for analysis.", None
 
     # --- Step 1: Get Document Text ---
     doc_text = document_texts_cache.get(filename)
@@ -645,7 +645,7 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
 
     # --- Step 4: Call LLM and Parse Response ---
     try:
-        # logger.info(f"Invoking LLM for '{analysis_type}' analysis of '{filename}' (model: {OLLAMA_MODEL})...") # Already logged above
+        # logger.info(f"Invoking LLM for '{analysis_type}' analysis of '{filename}' (model: {OLLAMA_MODEL})") # Already logged above
         # Use .invoke() for ChatOllama
         response_object = llm.invoke(final_prompt)
         full_analysis_response = getattr(response_object, 'content', str(response_object))
@@ -656,6 +656,14 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
 
         # Parse potential thinking and main content using the utility function
         analysis_content, thinking_content = parse_llm_response(full_analysis_response)
+
+        # Clean Mermaid code for mindmap analysis
+
+        #######
+        if analysis_type == "mindmap" and analysis_content:
+            analysis_content = clean_mermaid_mindmap(analysis_content)
+        elif analysis_type == "flowchart" and analysis_content:
+            analysis_content = clean_mermaid_flowchart(analysis_content)
 
         if thinking_content:
             logger.info(f"Parsed thinking content from analysis response for '{filename}'.")
@@ -679,5 +687,71 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
         # Try to return error message with thinking if parsing happened before error? Unlikely.
         return f"Error generating analysis: AI model failed ({type(e).__name__}). Check logs for details.", None
 # --- END MODIFICATION ---
+
+def clean_mermaid_code(llm_output: str) -> str:
+    """
+    Extracts and cleans Mermaid mindmap code from LLM output.
+    Removes code block markers and extra text.
+    """
+    code = llm_output.strip()
+    # Remove triple backticks and language hints
+    if code.startswith("```"):
+        code = code.lstrip("`")
+        # Remove the first line (which may be 'mermaid')
+        code = "\n".join(code.splitlines()[1:])
+    if code.endswith("```"):
+        code = code.rstrip("`")
+    # Extract only the mindmap block if there is extra text
+    if "mindmap" in code:
+        code = code[code.index("mindmap"):]
+    return code.strip()
+
+def clean_mermaid_flowchart(llm_output: str) -> str:
+    """Clean and sanitize Mermaid flowchart (graph TD) output from LLM."""
+    lines = llm_output.strip().splitlines()
+
+    # Remove triple backticks and whitespace
+    lines = [line.strip("` ").rstrip() for line in lines if not line.strip().startswith("```")]
+
+    # Find the line with "graph TD"
+    header_index = next((i for i, line in enumerate(lines) if line.startswith("graph TD")), None)
+    if header_index is None:
+        return ""
+
+    # Keep only lines from "graph TD" onward
+    final_lines = lines[header_index:]
+
+    # Deduplicate while preserving order
+    seen = set()
+    cleaned_lines = []
+    for line in final_lines:
+        if line and line not in seen:
+            cleaned_lines.append(line)
+            seen.add(line)
+
+    return "\n".join(cleaned_lines)
+
+def clean_mermaid_mindmap(llm_output: str) -> str:
+    """
+    Cleans Mermaid mindmap code from LLM output.
+    Ensures 'mindmap' is on its own line and removes code block markers.
+    """
+    code = llm_output.strip()
+    if code.startswith("```"):
+        code = code.lstrip("`")
+        code = "\n".join(code.splitlines()[1:])
+    if code.endswith("```"):
+        code = code.rstrip("`")
+    idx = code.find('mindmap')
+    if idx != -1:
+        after = code[idx + len('mindmap'):]
+        after = after.lstrip('\r\n\t :')
+        if after and after[0] != '\n':
+            after = '\n' + after
+        code = 'mindmap' + after
+    code = "\n".join([line for line in code.splitlines() if line.strip() != ""])
+    return code.strip()
+
+
 
 # --- END OF FILE ai_core.py ---

@@ -165,30 +165,59 @@ ANALYSIS_PROMPTS = {
 """
     ),
     "mindmap": PromptTemplate(
-        input_variables=["doc_text_for_llm"],
-        template=_ANALYSIS_THINKING_PREFIX + """
-**TASK:** Generate a mind map diagram using Mermaid.js syntax. The mind map should represent the key concepts, their hierarchy, and relationships as described ONLY in the provided text.
+    input_variables=["doc_text_for_llm"],
+    template=_ANALYSIS_THINKING_PREFIX + """
+**TASK:** Convert the provided document content into a hierarchical Mermaid.js mindmap.
 
 **OUTPUT FORMAT (Strict):**
-*   Start directly with the Mermaid mindmap code block (after thinking, if used).
-*   The output **MUST** be valid Mermaid.js mindmap syntax.
-*   Example:
-    ```mermaid
-    mindmap
-      root((Main Topic from Text))
-        (Topic A)
-          (Sub-topic A1)
-          (Sub-topic A2)
-        (Topic B)
-          (Sub-topic B1)
-        (Topic C)
-    ```
-*   Do **NOT** include any preamble, explanations outside the Mermaid code block, or any text other than the Mermaid syntax itself (and the optional thinking block).
-*   Ensure the mindmap is derived **strictly** from the provided document text.
+*   The first line MUST be: mindmap
+*   The second line MUST be the root topic in double parentheses, e.g., `  root((Main Topic))` ← (with 2 spaces!)
+*   Use 2 or 4 spaces for indentation to define child and sub-child relationships.
+*   Use short, meaningful phrases directly from the text.
+*   Do NOT use arrows (-->), graph types (graph TD), or triple backticks.
+*   Do NOT include any explanations or extra commentary.
 
-**BEGIN OUTPUT (Start with '```mermaid' or `<thinking>`):**
+**BEGIN OUTPUT (Start with 'mindmap'):**
+mindmap
+  root((Main Topic))
+    Subtopic A
+      Detail A1
+      Detail A2
+    Subtopic B
+      Detail B1
+        Subdetail B1.1
+
+*Your Turn:*
+{doc_text_for_llm}
 """
-    )
+),
+
+"flowchart": PromptTemplate(
+    input_variables=["doc_text_for_llm"],
+    template=_ANALYSIS_THINKING_PREFIX + """
+**TASK:** Convert the provided document content into a structured Mermaid.js flowchart.
+
+**OUTPUT FORMAT (Strict):**
+*   The first line MUST be: graph TD
+*   Use directional arrows (-->) and meaningful node labels.
+*   Enclose nodes in square brackets for normal boxes [like this], or in parentheses (like this) for rounded shapes.
+*   Use indentation or new lines to show hierarchy.
+*   ONLY return Mermaid code. Do NOT include any explanations or triple backticks.
+
+**BEGIN OUTPUT (Start with 'graph TD'):**
+graph TD
+    A[Main Topic] --> B(Subtopic)
+    B --> C{{Decision Point}}
+    C -->|Option 1| D[Detail 1]
+    C -->|Option 2| E[Detail 2]
+
+*Your Turn:*
+{doc_text_for_llm}
+"""
+),
+
+
+
 }
 
 

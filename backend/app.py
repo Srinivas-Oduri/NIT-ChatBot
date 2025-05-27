@@ -11,8 +11,9 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from waitress import serve
 from datetime import datetime, timezone # Correct import
-import whisper
-import tempfile
+# if want to use backend for text to speech use whisper
+# import whisper
+# import tempfile
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Initialize Logging and Configuration First ---
