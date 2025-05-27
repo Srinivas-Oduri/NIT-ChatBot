@@ -1,6 +1,8 @@
 # --- START OF FILE app.py ---
 
 import os
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
 import logging
 import json
 import uuid
@@ -9,11 +11,23 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from waitress import serve
 from datetime import datetime, timezone # Correct import
+import whisper
+import tempfile
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Initialize Logging and Configuration First ---
 import config
 config.setup_logging() # Configure logging based on config
 logger = logging.getLogger(__name__) # Get logger for this module
+
+
+from flask import Flask, request, jsonify, render_template, redirect, url_for
+from config import users_collection, JWT_SECRET
+from werkzeug.security import generate_password_hash, check_password_hash
+import jwt
+from datetime import datetime, timedelta
+
+
 
 # --- Import Core Modules ---
 import database
@@ -141,7 +155,191 @@ def ensure_initialized():
 
 # --- Flask Routes ---
 
+# Google OAuth Setup
+from flask import Flask, redirect, url_for
+from flask_dance.contrib.google import make_google_blueprint, google
+from dotenv import load_dotenv
+load_dotenv()
+app.secret_key = os.environ.get("FLASK_SECRET_KEY")
+google_bp = make_google_blueprint(
+    client_id=os.getenv("GOOGLE_CLIENT_ID"),
+    client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+    redirect_to="google_login_callback",
+
+    # scope=["profile", "email"]
+    scope=[
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/userinfo.email"
+    ]
+)
+app.register_blueprint(google_bp, url_prefix="/login")
+
+
+def create_token(email):
+    payload = {
+        "email": email,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1)
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+    return token
+
+def decode_token(token):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+#redirections
+from functools import wraps
+from flask import session, redirect, url_for
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check for token in session or cookie (adjust as per your auth logic)
+        if not session.get('user_email'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# @app.route('/signup', methods=['GET', 'POST'])
+# def signup():
+#     if request.method == 'POST':
+#         email = request.form['email']
+#         password = generate_password_hash(request.form['password'])
+
+#         if users_collection.find_one({"email": email}):
+#             return "Email already exists!"
+
+#         users_collection.insert_one({"email": email, "password": password})
+#         return redirect(url_for('login'))
+
+#     return render_template('signup.html')
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = generate_password_hash(request.form['password'])
+
+        if users_collection.find_one({"email": email}):
+            return "Email already exists!"
+
+        users_collection.insert_one({"email": email, "password": password})
+        session['user_email'] = email 
+        return redirect(url_for('index'))
+
+    return render_template('signup.html')
+
+@app.route("/google_signup")
+def google_signup():
+    if not google.authorized:
+        return redirect(url_for("google.login"))
+    return redirect(url_for("google_signup_callback"))
+
+@app.route("/google_signup/callback")
+def google_signup_callback():
+    if not google.authorized:
+        return redirect(url_for("signup"))
+
+    resp = google.get("/oauth2/v2/userinfo")
+    if not resp.ok:
+        return jsonify({"error": "Failed to fetch user info from Google"}), 500
+
+    info = resp.json()
+    email = info["email"]
+
+    # Check if user already exists
+    user = users_collection.find_one({"email": email})
+    if not user:
+        users_collection.insert_one({
+            "email": email,
+            "name": info.get("name", ""),
+            "google_id": info.get("id", ""),
+            "profile_pic": info.get("picture", ""),
+            "password": ""  # no password needed for Google users
+        })
+
+    session['user_email'] = email  # Store login state in session
+    return redirect(url_for('index'))  # Redirect to "/"
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+
+        user = users_collection.find_one({"email": email})
+        if user and check_password_hash(user['password'], password):
+            session['user_email'] = email  # Store login state in session
+            return redirect(url_for('index'))  # Redirect to "/"
+
+        return render_template('login.html', error="Invalid credentials")
+
+    return render_template('login.html')
+
+
+
+
+@app.route("/google_login")
+def google_login():
+    if not google.authorized:
+        return redirect(url_for("google.login"))
+    return redirect(url_for("google_login_callback"))
+
+@app.route("/google_login/callback")
+def google_login_callback():
+    if not google.authorized:
+        return redirect(url_for("login"))
+
+    resp = google.get("/oauth2/v2/userinfo")
+    if not resp.ok:
+        return jsonify({"error": "Failed to fetch user info from Google"}), 500
+
+    info = resp.json()
+    email = info["email"]
+
+    # Check if user exists, otherwise create new user
+    user = users_collection.find_one({"email": email})
+    if not user:
+        users_collection.insert_one({
+            "email": email,
+            "name": info.get("name", ""),
+            "google_id": info.get("id", ""),
+            "profile_pic": info.get("picture", ""),
+            "password": ""  # no password for google-auth users
+        })
+
+    session['user_email'] = email  # Store login state in session
+    return redirect(url_for('index'))  # Redirect to "/"
+
+# --- Logout Route ---
+@app.route('/logout')
+def logout():
+    session.pop('user_email', None)
+    return redirect(url_for('login'))
+
+
+@app.route('/protected')
+def protected():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"error": "Authorization header missing"}), 401
+
+    token = auth_header.split(" ")[1] if " " in auth_header else auth_header
+    payload = decode_token(token)
+
+    if not payload:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    return jsonify({"message": f"Hello, {payload['email']}!"})
+
+
 @app.route('/')
+@login_required
 def index():
     """Serves the main HTML page."""
     logger.debug("Serving index.html")
@@ -623,6 +821,8 @@ def get_history():
          return jsonify({"error": f"Unexpected server error retrieving history: {type(e).__name__}. Check logs."}), 500
 
 
+
+
 # --- Main Execution ---
 if __name__ == '__main__':
     # Ensure initialization runs when script is executed directly
@@ -632,7 +832,7 @@ if __name__ == '__main__':
 
     try:
         # Read port from environment variable or default to 5000
-        port = int(os.getenv('FLASK_RUN_PORT', 5000))
+        port = int(os.getenv('FLASK_RUN_PORT', 5001))
         if not (1024 <= port <= 65535):
              logger.warning(f"Port {port} is outside the typical range (1024-65535). Using default 5000.")
              port = 5000
@@ -664,6 +864,6 @@ if __name__ == '__main__':
     logger.info("Press Ctrl+C to stop the server.")
 
     # Use Waitress for a production-grade WSGI server
-    serve(app, host=host, port=5005, threads=8) # Adjust threads based on expected load/cores
+    serve(app, host="localhost", port=port, threads=8) # Adjust threads based on expected load/cores
 
 # --- END OF FILE app.py ---

@@ -3,6 +3,29 @@ from dotenv import load_dotenv
 import logging
 from langchain.prompts import PromptTemplate # Import PromptTemplate
 
+
+#mongodb setup
+
+import os
+from pymongo import MongoClient
+
+load_dotenv()
+
+MONGO_URI = os.getenv("MONGO_URI")
+JWT_SECRET = os.getenv("JWT_SECRET")  # Add this in .env
+
+import ssl
+
+client = MongoClient(
+    MONGO_URI,
+    tls=True,
+    tlsAllowInvalidCertificates=True
+)
+db = client["notebook_llm_ollama_db"]
+users_collection = db["users"]
+
+###########
+
 # Load environment variables from .env file in the same directory
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=dotenv_path)
