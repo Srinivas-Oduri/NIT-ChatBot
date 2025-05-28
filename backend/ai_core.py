@@ -5,6 +5,7 @@ import os
 import logging
 import fitz  # PyMuPDF
 import re
+import config
 # Near the top of ai_core.py
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings, ChatOllama
@@ -17,10 +18,14 @@ from config import (
     OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_EMBED_MODEL, FAISS_FOLDER,
     DEFAULT_PDFS_FOLDER, UPLOAD_FOLDER, RAG_CHUNK_K, MULTI_QUERY_COUNT,
     ANALYSIS_MAX_CONTEXT_LENGTH, OLLAMA_REQUEST_TIMEOUT, RAG_SEARCH_K_PER_QUERY,
-    SUB_QUERY_PROMPT_TEMPLATE, SYNTHESIS_PROMPT_TEMPLATE, ANALYSIS_PROMPTS
+    SUB_QUERY_PROMPT_TEMPLATE, SYNTHESIS_PROMPT_TEMPLATE, ANALYSIS_PROMPTS, db
 )
 from utils import parse_llm_response, escape_html # Added escape_html for potential use
 import pdfplumber
+import gridfs
+import tempfile
+
+fs = gridfs.GridFS(db)
 
 logger = logging.getLogger(__name__)
 
@@ -517,7 +522,7 @@ def synthesize_chat_response(query: str, context_text: str) -> tuple[str, str | 
          return "Error: Could not prepare the request for the AI model.", None
 
     try:
-        # logger.info(f"Invoking LLM for chat synthesis (model: {OLLAMA_MODEL})...") # Already logged above
+        # logger.info(f"Invoking LLM for chat synthesis (model: {OLLAMA_MODEL})") # Already logged above
         # Use .invoke() for ChatOllama which returns AIMessage, access content with .content
         response_object = llm.invoke(final_prompt)
         # Ensure response_object has 'content' attribute
@@ -561,7 +566,7 @@ def synthesize_chat_response(query: str, context_text: str) -> tuple[str, str | 
 # --- END MODIFICATION ---
 
 # --- MODIFIED: Added logging ---
-def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str | None, str | None]:
+def generate_document_analysis(filename: str, analysis_type: str, user_email=None) -> tuple[str | None, str | None]:
     """
     Generates analysis (FAQ, Topics, Mindmap) for a specific document, optionally including thinking.
     Uses ANALYSIS_PROMPTS from config. Retrieves text from cache or disk.
@@ -579,34 +584,17 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
         return "Error: AI model is not available for analysis.", None
 
     # --- Step 1: Get Document Text ---
-    doc_text = document_texts_cache.get(filename)
-    if not doc_text:
-        logger.warning(f"Text for '{filename}' not in cache. Attempting load from disk...")
-        # Determine the potential path (check uploads first, then defaults)
-        potential_paths = [
-            os.path.join(UPLOAD_FOLDER, filename),
-            os.path.join(DEFAULT_PDFS_FOLDER, filename)
-        ]
-        load_path = next((p for p in potential_paths if os.path.exists(p)), None)
+    try:
+        doc_text = get_document_text(filename, user_email=user_email)
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return f"Error: Document '{filename}' not found.", None
+    except Exception as e:
+        logger.error(f"Unexpected error loading document '{filename}': {e}", exc_info=True)
+        return f"Error: Failed to retrieve text content for '{filename}'.", None
 
-        if load_path:
-            logger.debug(f"Found '{filename}' at: {load_path}")
-            doc_text = extract_text_from_pdf(load_path) # Extract fresh if not cached
-            if doc_text:
-                document_texts_cache[filename] = doc_text # Cache it now
-                logger.info(f"Loaded and cached text for '{filename}' from {load_path} for analysis.")
-            else:
-                logger.error(f"Failed to extract text from '{filename}' at {load_path} even though file exists.")
-                # Return specific error if extraction fails
-                return f"Error: Could not extract text content from '{filename}'. File might be corrupted or empty.", None
-        else:
-            logger.error(f"Document file '{filename}' not found in default or upload folders for analysis.")
-            # Return error indicating file not found
-            return f"Error: Document '{filename}' not found.", None
-
-    # If after all checks, doc_text is still None or empty, something went wrong
     if not doc_text:
-        logger.error(f"Analysis failed: doc_text is unexpectedly empty for '{filename}' after cache/disk checks.")
+        logger.error(f"Analysis failed: doc_text is unexpectedly empty for '{filename}' after all checks.")
         return f"Error: Failed to retrieve text content for '{filename}'.", None
 
 
@@ -645,7 +633,7 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
 
     # --- Step 4: Call LLM and Parse Response ---
     try:
-        # logger.info(f"Invoking LLM for '{analysis_type}' analysis of '{filename}' (model: {OLLAMA_MODEL})...") # Already logged above
+        # logger.info(f"Invoking LLM for '{analysis_type}' analysis of '{filename}' (model: {OLLAMA_MODEL})") # Already logged above
         # Use .invoke() for ChatOllama
         response_object = llm.invoke(final_prompt)
         full_analysis_response = getattr(response_object, 'content', str(response_object))
@@ -656,6 +644,14 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
 
         # Parse potential thinking and main content using the utility function
         analysis_content, thinking_content = parse_llm_response(full_analysis_response)
+
+        # Clean Mermaid code for mindmap analysis
+
+        #######
+        if analysis_type == "mindmap" and analysis_content:
+            analysis_content = clean_mermaid_mindmap(analysis_content)
+        elif analysis_type == "flowchart" and analysis_content:
+            analysis_content = clean_mermaid_flowchart(analysis_content)
 
         if thinking_content:
             logger.info(f"Parsed thinking content from analysis response for '{filename}'.")
@@ -680,4 +676,109 @@ def generate_document_analysis(filename: str, analysis_type: str) -> tuple[str |
         return f"Error generating analysis: AI model failed ({type(e).__name__}). Check logs for details.", None
 # --- END MODIFICATION ---
 
+def clean_mermaid_code(llm_output: str) -> str:
+    """
+    Extracts and cleans Mermaid mindmap code from LLM output.
+    Removes code block markers and extra text.
+    """
+    code = llm_output.strip()
+    # Remove triple backticks and language hints
+    if code.startswith("```"):
+        code = code.lstrip("`")
+        # Remove the first line (which may be 'mermaid')
+        code = "\n".join(code.splitlines()[1:])
+    if code.endswith("```"):
+        code = code.rstrip("`")
+    # Extract only the mindmap block if there is extra text
+    if "mindmap" in code:
+        code = code[code.index("mindmap"):]
+    return code.strip()
+
+def clean_mermaid_flowchart(llm_output: str) -> str:
+    """Clean and sanitize Mermaid flowchart (graph TD) output from LLM."""
+    lines = llm_output.strip().splitlines()
+
+    # Remove triple backticks and whitespace
+    lines = [line.strip("` ").rstrip() for line in lines if not line.strip().startswith("```")]
+
+    # Find the line with "graph TD"
+    header_index = next((i for i, line in enumerate(lines) if line.startswith("graph TD")), None)
+    if header_index is None:
+        return ""
+
+    # Keep only lines from "graph TD" onward
+    final_lines = lines[header_index:]
+
+    # Deduplicate while preserving order
+    seen = set()
+    cleaned_lines = []
+    for line in final_lines:
+        if line and line not in seen:
+            cleaned_lines.append(line)
+            seen.add(line)
+
+    return "\n".join(cleaned_lines)
+
+def clean_mermaid_mindmap(llm_output: str) -> str:
+    """
+    Cleans Mermaid mindmap code from LLM output.
+    Ensures 'mindmap' is on its own line and removes code block markers.
+    """
+    code = llm_output.strip()
+    if code.startswith("```"):
+        code = code.lstrip("`")
+        code = "\n".join(code.splitlines()[1:])
+    if code.endswith("```"):
+        code = code.rstrip("`")
+    idx = code.find('mindmap')
+    if idx != -1:
+        after = code[idx + len('mindmap'):]
+        after = after.lstrip('\r\n\t :')
+        if after and after[0] != '\n':
+            after = '\n' + after
+        code = 'mindmap' + after
+    code = "\n".join([line for line in code.splitlines() if line.strip() != ""])
+    return code.strip()
+
+
+
 # --- END OF FILE ai_core.py ---
+
+# ai_core.py
+
+from config import db
+import gridfs
+import tempfile
+
+fs = gridfs.GridFS(db)
+
+def get_document_text(filename, user_email=None):
+    # 1. Check cache first
+    if filename in document_texts_cache:
+        return document_texts_cache[filename]
+
+    # 2. Try to load from default folder
+    default_path = os.path.join(config.DEFAULT_PDFS_FOLDER, filename)
+    if os.path.exists(default_path):
+        text = extract_text_from_pdf(default_path)
+        document_texts_cache[filename] = text
+        return text
+
+    # 3. Try to load from GridFS for user-uploaded files
+    if user_email:
+        file_obj = fs.find_one({"filename": filename, "metadata.user_email": user_email})
+        if file_obj:
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
+                temp.write(file_obj.read())
+                temp.flush()
+                text = extract_text_from_pdf(temp.name)
+                document_texts_cache[filename] = text
+                # After text = extract_text_from_pdf(temp.name)
+                if text:
+                    logger.info(f"Successfully extracted text from GridFS PDF '{filename}' for user '{user_email}'.")
+                else:
+                    logger.error(f"Failed to extract text from GridFS PDF '{filename}' for user '{user_email}'.")
+                return text
+
+    # 4. Not found
+    raise FileNotFoundError(f"Document file '{filename}' not found in default folder or GridFS for user.")

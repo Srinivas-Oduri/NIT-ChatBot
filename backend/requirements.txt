@@ -41,3 +41,8 @@ httpx
 
 # Optional: For potential Markdown sanitization on frontend (via CDN)
 # No Python package needed, but noted here.
+
+pymongo
+jwt
+pdfplumber
+flask_dance

@@ -56,47 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     let isListening = false;
     let statusCheckTimer = null;
-    let statusMessageTimerId = null; // Timer for auto-hiding status messages
-
-    // --- Web Speech API ---
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    let recognition = null;
-
-    if (SpeechRecognition) {
-        try {
-            recognition = new SpeechRecognition();
-            recognition.continuous = false; // Stop after first utterance
-            recognition.lang = 'en-US';
-            recognition.interimResults = false;
-            recognition.maxAlternatives = 1;
-
-            recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
-                chatInput.value = transcript;
-                stopListeningUI();
-                // Automatically send after successful recognition
-                 handleSendMessage();
-            };
-            recognition.onerror = (event) => {
-                console.error('Speech recognition error:', event.error, event.message);
-                setChatStatus(`Speech error: ${event.error}`, 'warning'); // Use the new function
-                stopListeningUI();
-            };
-            recognition.onend = () => {
-                // Only update UI if it was actively listening and didn't stop due to result/error already
-                if (isListening) stopListeningUI();
-            };
-            // Initial state is disabled, enable later based on backend status
-        } catch (e) {
-             console.error("Error initializing SpeechRecognition:", e);
-             recognition = null;
-             if (voiceInputButton) voiceInputButton.title = "Voice input failed to initialize";
-        }
-    } else {
-        console.warn("Speech Recognition not supported by this browser.");
-        if (voiceInputButton) voiceInputButton.title = "Voice input not supported by browser";
-    }
-
+   let statusMessageTimerId = null; // Timer for auto-hiding status messages
 
     // --- Initialization ---
     function initializeApp() {
@@ -165,8 +125,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Voice Button
         if (voiceInputButton) {
-            voiceInputButton.disabled = !(canChat && recognition); // Enable only if chat & voice API ready
-            voiceInputButton.title = (canChat && recognition) ? "Start Voice Input" : (recognition ? "Chat disabled" : "Voice input not supported/initialized");
+            voiceInputButton.disabled = !canChat;
+            voiceInputButton.title = canChat ? "Start Voice Input" : "Chat disabled";
         }
 
         // Update status texts using the correct functions
@@ -185,7 +145,6 @@ document.addEventListener('DOMContentLoaded', () => {
         analysisButtons.forEach(button => button?.addEventListener('click', () => handleAnalysis(button.dataset.analysisType)));
         if (sendButton) sendButton.addEventListener('click', handleSendMessage);
         if (chatInput) chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!sendButton?.disabled) handleSendMessage(); } });
-        if (recognition && voiceInputButton) voiceInputButton.addEventListener('click', toggleListening);
         if (analysisFileSelect) analysisFileSelect.addEventListener('change', handleAnalysisFileSelection); // Keep this listener
         if (uploadInput) uploadInput.addEventListener('change', handleFileInputChange);
         if (statusMessageButton) statusMessageButton.addEventListener('click', () => clearTimeout(statusMessageTimerId)); // Clear timer on manual close
@@ -551,7 +510,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (chatInput) chatInput.disabled = disabled;
         if (sendButton) sendButton.disabled = disabled;
         // Disable voice based on chat state AND recognition availability
-        if (voiceInputButton) voiceInputButton.disabled = disabled || !recognition;
+        if (voiceInputButton) voiceInputButton.disabled = disabled;
     }
 
     function showSpinner(spinnerElement, show = true) {
@@ -690,7 +649,7 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
                 } else {
                     analysisOutput.textContent = analysisContent;
                 }
-            } else if (analysisType === 'mindmap') {
+            } else if (analysisType === 'mindmap' || analysisType === 'flowchart') {
                 // Display raw Mermaid source in the main output area (optional)
                 analysisOutput.innerHTML = `<p class="small text-muted">Mermaid Source:</p><pre class="mindmap-markdown-source"><code>${escapeHtml(analysisContent)}</code></pre>`;
                 
@@ -869,24 +828,7 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
     }
 
     // --- Voice Input ---
-    function toggleListening() {
-        if (!recognition || !voiceInputButton || voiceInputButton.disabled) return;
-        if (isListening) {
-            recognition.stop();
-            console.log("Speech recognition stopped manually.");
-            // stopListeningUI() will be called by 'onend' event
-        } else {
-            try {
-                recognition.start();
-                startListeningUI();
-                console.log("Speech recognition started.");
-            } catch (error) {
-                console.error("Error starting speech recognition:", error);
-                setChatStatus("Voice input error. Check mic?", 'warning'); // Use the new function
-                stopListeningUI(); // Reset UI if start fails
-            }
-        }
-    }
+    
 
     function startListeningUI() {
         isListening = true;
@@ -913,7 +855,55 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
         }
     }
 
-    // --- Start ---
-    initializeApp();
+    // --- Whisper Voice Input via MediaRecorder ---
+let mediaRecorder;
+let audioChunks = [];
+let isRecording = false;
+
+if (voiceInputButton) {
+    voiceInputButton.addEventListener('click', async () => {
+        if (!isRecording) {
+            // Start recording
+            audioChunks = [];
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.start();
+                isRecording = true;
+                startListeningUI();
+
+                mediaRecorder.ondataavailable = event => {
+                    if (event.data.size > 0) audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    stopListeningUI();
+                    isRecording = false;
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob, 'recording.webm');
+                    setChatStatus('Transcribing...');
+                    try {
+                        const response = await fetch('/transcribe', { method: 'POST', body: formData });
+                        const data = await response.json();
+                        chatInput.value = data.transcript || '';
+                        setChatStatus('Ready');
+                    } catch (e) {
+                        setChatStatus('Transcription failed', 'danger');
+                    }
+                };
+            } catch (e) {
+                setChatStatus('Microphone access denied', 'danger');
+            }
+        } else {
+            // Stop recording
+            mediaRecorder.stop();
+            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        }
+    });
+}
+
+// --- Start ---
+initializeApp();
 
 }); // End DOMContentLoaded

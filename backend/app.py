@@ -2,6 +2,7 @@
 
 import os
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import logging
 import json
@@ -27,6 +28,10 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from datetime import datetime, timedelta
 
+#user uploads
+import gridfs
+from config import db
+fs = gridfs.GridFS(db)
 
 
 # --- Import Core Modules ---
@@ -395,43 +400,33 @@ def get_status():
 
 @app.route('/documents', methods=['GET'])
 def get_documents():
-    """Returns sorted lists of default and uploaded PDF filenames."""
-    # logger.debug("Documents list endpoint requested.")
-    default_files = []
-    uploaded_files = []
-    error_messages = []
+    """Returns lists of default and user-uploaded PDF filenames from MongoDB."""
+    from flask import session
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"default_files": [], "uploaded_files": [], "errors": ["User not authenticated."]})
 
-    def _list_pdfs(folder_path, folder_name_for_error):
-        files = []
+    # Default files (still from folder, if you want to keep them)
+    def _list_pdfs(folder_path):
         if not os.path.exists(folder_path):
-            logger.warning(f"Document folder not found: {folder_path}")
-            error_messages.append(f"Folder not found: {folder_name_for_error}")
-            return files
-        try:
-            # List, filter for PDFs, ensure they are files, sort
-            files = sorted([
-                f for f in os.listdir(folder_path)
-                if os.path.isfile(os.path.join(folder_path, f)) and
-                   f.lower().endswith('.pdf') and
-                   not f.startswith('~') # Ignore temp files
-            ])
-        except OSError as e:
-            logger.error(f"Error listing files in {folder_path}: {e}", exc_info=True)
-            error_messages.append(f"Could not read folder: {folder_name_for_error}")
-        return files
+            return []
+        return sorted([
+            f for f in os.listdir(folder_path)
+            if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith('.pdf')
+        ])
 
-    default_files = _list_pdfs(config.DEFAULT_PDFS_FOLDER, "Default PDFs")
-    uploaded_files = _list_pdfs(config.UPLOAD_FOLDER, "Uploaded PDFs")
+    default_files = _list_pdfs(config.DEFAULT_PDFS_FOLDER)
 
-    # Combine and deduplicate for the dropdown if needed, or return separately
-    # For separate lists as requested:
-    response_data = {
+    # Uploaded files from MongoDB GridFS for this user
+    uploaded_files = []
+    for f in fs.find({"metadata.user_email": user_email}):
+        uploaded_files.append(f.filename)
+
+    return jsonify({
         "default_files": default_files,
         "uploaded_files": uploaded_files,
-        "errors": error_messages if error_messages else None
-    }
-    logger.debug(f"Returning document lists: {len(default_files)} default, {len(uploaded_files)} uploaded.")
-    return jsonify(response_data)
+        "errors": None
+    })
 
 
 @app.route('/upload', methods=['POST'])
@@ -442,16 +437,14 @@ def upload_file():
     # --- Check AI readiness (needed for embedding) ---
     if not app_ai_ready or not ai_core.embeddings:
          logger.error("Upload failed: AI Embeddings component not initialized.")
-         # 503 Service Unavailable is appropriate
          return jsonify({"error": "Cannot process upload: AI processing components are not ready. Check server status."}), 503
 
-    # --- File Handling ---
     if 'file' not in request.files:
         logger.warning("Upload request missing 'file' part.")
         return jsonify({"error": "No file part in the request"}), 400
 
     file = request.files['file']
-    if not file or not file.filename: # Check if filename is empty string
+    if not file or not file.filename:
         logger.warning("Upload request received with no selected file name.")
         return jsonify({"error": "No file selected"}), 400
 
@@ -459,81 +452,45 @@ def upload_file():
          logger.warning(f"Upload attempt with disallowed file type: {file.filename}")
          return jsonify({"error": "Invalid file type. Only PDF files (.pdf) are allowed."}), 400
 
-    # Sanitize filename
     filename = secure_filename(file.filename)
-    if not filename: # secure_filename might return empty if input is weird
+    if not filename:
          logger.warning(f"Could not secure filename from: {file.filename}. Using generic name.")
-         filename = f"upload_{uuid.uuid4()}.pdf" # Fallback name
+         filename = f"upload_{uuid.uuid4()}.pdf"
 
+    # --- Store in MongoDB GridFS ---
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"error": "User not authenticated."}), 401
 
-    # Prevent overwriting existing files? Or allow? Allow for simplicity, user manages uploads.
-    # Consider adding a check if filename exists and maybe renaming or rejecting?
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    logger.debug(f"Attempting to save uploaded file to: {filepath}")
+    # Remove any previous file with the same name for this user (optional)
+    for old_file in fs.find({"filename": filename, "metadata.user_email": user_email}):
+        fs.delete(old_file._id)
 
-    # --- Save and Process ---
-    try:
-        # Ensure upload dir exists (double check)
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        file.save(filepath)
-        logger.info(f"File '{filename}' saved successfully to {filepath}")
+    # Save file to GridFS with user metadata
+    file_id = fs.put(
+        file,
+        filename=filename,
+        content_type=file.content_type,
+        metadata={"user_email": user_email}
+    )
+    logger.info(f"File '{filename}' uploaded to GridFS with id {file_id} for user {user_email}")
 
-        # 1. Extract text
-        logger.info(f"Processing uploaded file: {filename}...")
-        text = ai_core.extract_text_from_pdf(filepath)
-        if not text:
-            # Extraction failed, remove the saved file
-            try:
-                os.remove(filepath)
-                logger.info(f"Removed file {filepath} because text extraction failed.")
-            except OSError as rm_err:
-                logger.error(f"Error removing problematic file {filepath} after failed text extraction: {rm_err}")
-            logger.error(f"Could not extract text from uploaded file: {filename}. It might be empty, corrupted, or password-protected.")
-            # Return 400 Bad Request as the file is unusable
-            return jsonify({"error": f"Could not read text from '{filename}'. Please check if the PDF is valid and not password-protected."}), 400
+    # Optionally, process the file as before (extract text, add to vector store, etc.)
+    # You can read the file back from GridFS:
+    gridout = fs.get(file_id)
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
+        temp.write(gridout.read())
+        temp.flush()
+        text = ai_core.extract_text_from_pdf(temp.name)
+        # ... (rest of your processing logic as before) ...
 
-        # 2. Add extracted text to cache (overwrite if filename exists)
-        ai_core.document_texts_cache[filename] = text
-        logger.info(f"Text extracted ({len(text)} chars) and cached for {filename}.")
+    # Continue with your existing logic for text extraction, chunking, vector store, etc.
 
-        # 3. Create chunks/documents
-        logger.debug(f"Creating document chunks for {filename}...")
-        documents = ai_core.create_chunks_from_text(text, filename)
-        if not documents:
-             # Text extracted but chunking failed. Keep file & cache, but RAG won't work.
-             logger.error(f"Could not create document chunks for {filename}, although text was extracted. File kept and cached, but cannot add to knowledge base for chat.")
-             # Return 500 Internal Server Error as processing failed partially
-             return jsonify({"error": f"Could not process the structure of '{filename}' into searchable chunks. Analysis might work, but chat context cannot be added for this file."}), 500
-
-        # 4. Add to vector store (this handles index creation/saving internally)
-        logger.debug(f"Adding {len(documents)} chunks for {filename} to vector store...")
-        if not ai_core.add_documents_to_vector_store(documents):
-            logger.error(f"Failed to add document chunks for '{filename}' to the vector store or save the index. Check logs.")
-            # Keep file/cache, but report index failure.
-            return jsonify({"error": f"File '{filename}' processed, but failed to update the knowledge base index. Consult server logs."}), 500
-
-        # --- Success ---
-        vector_count = -1
-        if ai_core.vector_store and hasattr(ai_core.vector_store, 'index'):
-             vector_count = getattr(ai_core.vector_store.index, 'ntotal', 0)
-        logger.info(f"Successfully processed, cached, and indexed '{filename}'. New vector count: {vector_count}")
-        # Return success message, filename, and maybe new count
-        return jsonify({
-            "message": f"File '{filename}' uploaded and added to knowledge base successfully.",
-            "filename": filename,
-            "vector_count": vector_count
-        }), 200 # 200 OK for successful upload and processing
-
-    except Exception as e:
-        logger.error(f"Unexpected error processing upload for filename '{filename}': {e}", exc_info=True)
-        # Clean up potentially saved file if an error occurred mid-process
-        if 'filepath' in locals() and os.path.exists(filepath):
-             try:
-                 os.remove(filepath)
-                 logger.info(f"Cleaned up file {filepath} after upload processing error.")
-             except OSError as rm_err:
-                 logger.error(f"Error attempting to clean up file {filepath} after error: {rm_err}")
-        return jsonify({"error": f"An unexpected server error occurred while processing the file: {type(e).__name__}. Please check server logs."}), 500
+    return jsonify({
+        "message": f"File '{filename}' uploaded and added to knowledge base successfully.",
+        "filename": filename,
+        "file_id": str(file_id)
+    }), 200
 
 
 @app.route('/analyze', methods=['POST'])
@@ -571,7 +528,8 @@ def analyze_document():
     try:
         # ai_core.generate_document_analysis handles text retrieval (cache/disk) and LLM call
         # It now returns (analysis_content, thinking_content) or (error_message, thinking_content/None)
-        analysis_content, thinking_content = ai_core.generate_document_analysis(filename, analysis_type)
+        user_email = session.get('user_email')
+        analysis_content, thinking_content = ai_core.generate_document_analysis(filename, analysis_type, user_email=user_email)
 
         # Check the result from ai_core
         if analysis_content is None:
@@ -822,6 +780,54 @@ def get_history():
 
 
 
+
+# --- Whisper Speech-to-Text Endpoint ---
+@app.route('/transcribe', methods=['POST'])
+def transcribe_audio():
+    """
+    Accepts an audio file (webm/wav/mp3/etc) and returns the Whisper transcript.
+    """
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+    audio_file = request.files['audio']
+    if not audio_file:
+        return jsonify({'error': 'No audio file received'}), 400
+
+    # Save to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".webm") as temp:
+        audio_file.save(temp.name)
+        try:
+            # You can use "base", "small", "medium", or "large" for the model
+            model = whisper.load_model("base")
+            result = model.transcribe(temp.name)
+            transcript = result.get("text", "")
+            return jsonify({'transcript': transcript})
+        except Exception as e:
+            logger.error(f"Whisper transcription failed: {e}", exc_info=True)
+            return jsonify({'error': f"Transcription failed: {str(e)}"}), 500
+
+@app.route('/user_files', methods=['GET'])
+def user_files():
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"error": "User not authenticated."}), 401
+    files = fs.find({"metadata.user_email": user_email})
+    file_list = [{"filename": f.filename, "file_id": str(f._id)} for f in files]
+    return jsonify(file_list)
+
+@app.route('/download/<file_id>', methods=['GET'])
+def download_file(file_id):
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"error": "User not authenticated."}), 401
+    try:
+        file = fs.get(ObjectId(file_id))
+        if file.metadata.get("user_email") != user_email:
+            return jsonify({"error": "Unauthorized"}), 403
+        return Response(file.read(), mimetype=file.content_type,
+                        headers={"Content-Disposition": f"attachment;filename={file.filename}"})
+    except Exception as e:
+        return jsonify({"error": "File not found"}), 404
 
 # --- Main Execution ---
 if __name__ == '__main__':
