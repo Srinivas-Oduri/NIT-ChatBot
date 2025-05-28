@@ -204,19 +204,9 @@ mindmap
 *   Use indentation or new lines to show hierarchy.
 *   ONLY return Mermaid code. Do NOT include any explanations or triple backticks.
 
-**BEGIN OUTPUT (Start with 'graph TD'):**
-graph TD
-    A[Main Topic] --> B(Subtopic)
-    B --> C{{Decision Point}}
-    C -->|Option 1| D[Detail 1]
-    C -->|Option 2| E[Detail 2]
-
-*Your Turn:*
-{doc_text_for_llm}
+**BEGIN OUTPUT (Start with '```mermaid' or `<thinking>`):**
 """
-),
-
-
+    )
 }
 
 

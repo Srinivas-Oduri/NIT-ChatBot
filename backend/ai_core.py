@@ -581,7 +581,7 @@ def generate_document_analysis(filename: str, analysis_type: str, user_email=Non
 
     if not llm:
         logger.error("LLM not initialized, cannot perform analysis.")
-        return "Error: AI model is not available for analysis.", None
+        return " Error: AI MODEL is not available for analysis.", None
 
     # --- Step 1: Get Document Text ---
     try:

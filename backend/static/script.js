@@ -907,3 +907,37 @@ if (voiceInputButton) {
 initializeApp();
 
 }); // End DOMContentLoaded
+document.addEventListener('DOMContentLoaded', function() {
+    const voiceBtn = document.getElementById('voice-input-button');
+    const chatInput = document.getElementById('chat-input');
+    // Enable the mic button if supported
+    if ('webkitSpeechRecognition' in window) {
+        voiceBtn.disabled = false;
+        let recognition = new webkitSpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.continuous = false;
+        recognition.interimResults = false;
+
+        voiceBtn.addEventListener('click', function() {
+            recognition.start();
+            voiceBtn.disabled = true;
+            voiceBtn.textContent = "🎙️";
+        });
+
+        recognition.onresult = function(event) {
+            const transcript = event.results[0][0].transcript;
+            chatInput.value = transcript;
+            voiceBtn.disabled = false;
+            voiceBtn.textContent = "🎤";
+            chatInput.focus();
+        };
+
+        recognition.onerror = function() {
+            voiceBtn.disabled = false;
+            voiceBtn.textContent = "🎤";
+        };
+    } else {
+        voiceBtn.disabled = true;
+        voiceBtn.title = "Speech recognition not supported in this browser.";
+    }
+});

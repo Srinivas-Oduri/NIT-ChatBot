@@ -186,10 +186,11 @@ def build_initial_faiss_index():
         logger.error("Failed to add new documents to the FAISS index or save it.")
         return False
 
+
 if __name__ == "__main__":
     logger.info("Running default PDF processing script...")
     # Uncomment to enable DEBUG logging for more detail
-    # logging.getLogger().setLevel(logging.DEBUG)
+    logging.getLogger().setLevel(logging.DEBUG)
     try:
         if build_initial_faiss_index():
             logger.info("--- Default index build/update process completed successfully. ---")
@@ -200,3 +201,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"--- An unexpected critical error occurred during the default script: {e} ---", exc_info=True)
         sys.exit(2)  # Different error code for unexpected failure
+        
+        
+        
+        
