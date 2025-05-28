@@ -19,6 +19,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Initialize Logging and Configuration First ---
 import config
+import tempfile
 config.setup_logging() # Configure logging based on config
 logger = logging.getLogger(__name__) # Get logger for this module
 
@@ -469,12 +470,11 @@ def upload_file():
 
     # Save file to GridFS with user metadata
     file_id = fs.put(
-        file,
+        file.stream,  # <-- Use .stream for Flask uploads
         filename=filename,
         content_type=file.content_type,
         metadata={"user_email": user_email}
     )
-    logger.info(f"File '{filename}' uploaded to GridFS with id {file_id} for user {user_email}")
 
     # Optionally, process the file as before (extract text, add to vector store, etc.)
     # You can read the file back from GridFS:
