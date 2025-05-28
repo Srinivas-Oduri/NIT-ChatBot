@@ -742,43 +742,5 @@ def clean_mermaid_mindmap(llm_output: str) -> str:
 
 
 
-# --- END OF FILE ai_core.py ---
 
-# ai_core.py
 
-from config import db
-import gridfs
-import tempfile
-
-fs = gridfs.GridFS(db)
-
-def get_document_text(filename, user_email=None):
-    # 1. Check cache first
-    if filename in document_texts_cache:
-        return document_texts_cache[filename]
-
-    # 2. Try to load from default folder
-    default_path = os.path.join(config.DEFAULT_PDFS_FOLDER, filename)
-    if os.path.exists(default_path):
-        text = extract_text_from_pdf(default_path)
-        document_texts_cache[filename] = text
-        return text
-
-    # 3. Try to load from GridFS for user-uploaded files
-    if user_email:
-        file_obj = fs.find_one({"filename": filename, "metadata.user_email": user_email})
-        if file_obj:
-            with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
-                temp.write(file_obj.read())
-                temp.flush()
-                text = extract_text_from_pdf(temp.name)
-                document_texts_cache[filename] = text
-                # After text = extract_text_from_pdf(temp.name)
-                if text:
-                    logger.info(f"Successfully extracted text from GridFS PDF '{filename}' for user '{user_email}'.")
-                else:
-                    logger.error(f"Failed to extract text from GridFS PDF '{filename}' for user '{user_email}'.")
-                return text
-
-    # 4. Not found
-    raise FileNotFoundError(f"Document file '{filename}' not found in default folder or GridFS for user.")
