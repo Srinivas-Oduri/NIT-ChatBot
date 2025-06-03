@@ -40,7 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusMessageButton = statusMessage?.querySelector('.btn-close'); // Get close button inside
     const connectionStatus = document.getElementById('connection-status');
     const sessionIdDisplay = document.getElementById('session-id-display');
-    // const mindmapOutputContainer = document.getElementById('mindmap-output-container'); 
+    const mindmapOutputContainer = document.getElementById('mindmap-output-container'); 
 
     // --- State ---
     let sessionId = localStorage.getItem('aiTutorSessionId') || null;
@@ -57,8 +57,21 @@ document.addEventListener('DOMContentLoaded', () => {
     let isListening = false;
     let statusCheckTimer = null;
    let statusMessageTimerId = null; // Timer for auto-hiding status messages
+   let currentSessionId = null; // --- MODIFIED: Current session ID for chat history ---
 
     // --- Initialization ---
+    async function createNewSession() {
+    // Call your backend to create a new session
+    const res = await fetch('/api/session', {method: 'POST'});
+    const data = await res.json();
+    // Set the current session ID
+    sessionId = data.session_id;
+    localStorage.setItem('aiTutorSessionId', sessionId);
+    setSessionIdDisplay(sessionId);
+    clearChatHistory();
+    addMessageToChat('bot', "New session started. Ask your first question!");
+    loadSessionHistory(); // <-- ADD THIS LINE
+}
     function initializeApp() {
         console.log("Initializing App...");
         showInitialLoading();
@@ -92,6 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
          }
          // Enable controls now backend is confirmed ready
          updateControlStates();
+         loadSessionHistory(); // <-- Add this line
     }
 
      function onBackendUnavailable(errorMsg = "Backend connection failed.") {
@@ -140,6 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+
     function setupEventListeners() {
         if (uploadButton) uploadButton.addEventListener('click', handleUpload);
         analysisButtons.forEach(button => button?.addEventListener('click', () => handleAnalysis(button.dataset.analysisType)));
@@ -148,6 +163,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (analysisFileSelect) analysisFileSelect.addEventListener('change', handleAnalysisFileSelection); // Keep this listener
         if (uploadInput) uploadInput.addEventListener('change', handleFileInputChange);
         if (statusMessageButton) statusMessageButton.addEventListener('click', () => clearTimeout(statusMessageTimerId)); // Clear timer on manual close
+
+        // --- MODIFIED: Session management button listeners ---
+        document.getElementById('new-session-btn').onclick = createNewSession;
 
         console.log("Event listeners setup.");
     }
@@ -590,7 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // backend/static/script.js
 // ... (near the top, ensure DOM elements are correctly identified) ...
-const mindmapOutputContainer = document.getElementById('mindmap-output-container'); // Duplicate declaration removed
+
 
 // ... (inside DOMContentLoaded) ...
 
@@ -767,6 +785,7 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
             disableChatInput(!backendStatus.ai); // Re-enable based on AI status
             showSpinner(sendSpinner, false);
             if(backendStatus.ai && chatInput) chatInput.focus();
+            loadSessionHistory(); // <-- Add this line here
         }
     }
 
@@ -827,6 +846,28 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
         }
     }
 
+    async function loadSessionHistory() {
+        const res = await fetch('/api/sessions');
+        const sessions = await res.json();
+        const box = document.getElementById('chat-history-box');
+        box.innerHTML = '';
+        sessions.forEach(s => {
+            const btn = document.createElement('button');
+            btn.className = 'list-group-item list-group-item-action bg-dark text-light mb-1';
+            btn.innerHTML = `<div>
+                <strong>${s.title || 'New Chat'}</strong>
+                <span class="text-muted small float-end">${toIndiaTimeString(s.updated_at)}</span>
+                <div class="small text-secondary">${s.last_message || ''}</div>
+            </div>`;
+            btn.onclick = () => {
+                sessionId = s.session_id;
+                localStorage.setItem('aiTutorSessionId', sessionId);
+                setSessionIdDisplay(sessionId);
+                loadChatHistory(sessionId);
+            };
+            box.appendChild(btn);
+        });
+    }
     // --- Voice Input ---
     
 
@@ -941,3 +982,20 @@ document.addEventListener('DOMContentLoaded', function() {
         voiceBtn.title = "Speech recognition not supported in this browser.";
     }
 });
+function toIndiaTimeString(utcString) {
+    if (!utcString) return '';
+    // Ensure ISO format with 'Z' for UTC
+    let isoString = utcString;
+    if (!isoString.endsWith('Z')) isoString += 'Z';
+    const indiaTime = new Date(isoString);
+    return indiaTime.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+}

@@ -5,13 +5,14 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import logging
+import whisper
 import json
 import uuid
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from waitress import serve
-from datetime import datetime, timezone # Correct import
+from datetime import datetime, timezone
 # if want to use backend for text to speech use whisper
 # import whisper
 # import tempfile
@@ -571,6 +572,7 @@ def analyze_document():
 
 @app.route('/chat', methods=['POST'])
 def chat():
+    user_email = session.get('user_email')  # <-- ADD THIS LINE
     """Handles chat interactions: RAG search, LLM synthesis, history saving."""
     # logger.debug("Chat request received.") # Can be noisy
 
@@ -642,6 +644,29 @@ def chat():
          logger.error(f"Database error occurred while saving user message for session {session_id}: {db_err}", exc_info=True)
          # Optionally return 500 here if saving user message is critical
          # return jsonify({"error": "Database error saving your message.", "answer": "Failed to record your message due to a database issue.", "thinking": None, "references": [], "session_id": session_id}), 500
+
+    # Add the user message to the session's messages array
+    now = datetime.now(timezone.utc)
+    user_message = {"role": "user", "content": query, "timestamp": now}
+    sessions_collection.update_one(
+        {"session_id": session_id, "user_email": user_email},
+        {
+            "$push": {"messages": user_message},
+            "$set": {"updated_at": now}
+        }
+    )
+    # Now update the title if this is the first user message
+    s = sessions_collection.find_one({"session_id": session_id, "user_email": user_email})
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+    if len(user_messages) == 1:
+        # Take the first user message, remove line breaks, and truncate to 50 chars
+        first_prompt = user_messages[0]["content"].replace('\n', ' ').replace('\r', ' ').strip()
+        if len(first_prompt) > 40:
+            first_prompt = first_prompt[:37] + "..."
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": first_prompt}}
+        )
 
 
     # --- RAG + Synthesis Pipeline ---
@@ -829,6 +854,116 @@ def download_file(file_id):
                         headers={"Content-Disposition": f"attachment;filename={file.filename}"})
     except Exception as e:
         return jsonify({"error": "File not found"}), 404
+
+# --- Session Management Endpoints ---
+from flask import session, jsonify, request
+from bson.objectid import ObjectId
+import uuid
+from datetime import datetime
+sessions_collection = db.sessions
+
+
+
+# Assume you have a MongoDB collection called 'sessions_collection'
+
+@app.route('/api/sessions', methods=['GET'])
+def get_sessions():
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify([]), 200
+    sessions = list(sessions_collection.find({"user_email": user_email}).sort("updated_at", -1))
+    result = []
+    for s in sessions:
+        # Truncate title and last_message to 40 chars, single line
+        title = s.get("title", "New Chat").replace('\n', ' ').replace('\r', ' ').strip()
+        if len(title) > 40:
+            title = title[:37] + "..."
+        last_msg = s["messages"][-1]["content"].replace('\n', ' ').replace('\r', ' ').strip() if s.get("messages") else ""
+        if len(last_msg) > 40:
+            last_msg = last_msg[:37] + "..."
+        updated_at = s.get("updated_at", s.get("created_at"))
+        updated_at_str = updated_at.isoformat() if updated_at else ""
+        result.append({
+            "session_id": s["session_id"],
+            "title": title,
+            "last_message": last_msg,
+            "updated_at": updated_at_str
+        })
+    return jsonify(result)
+
+@app.route('/api/session/<session_id>', methods=['GET'])
+def get_session(session_id):
+    user_email = session.get('user_email')
+    s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
+    if not s:
+        return jsonify({"messages": []})
+    return jsonify({"messages": s.get("messages", []), "title": s.get("title", "Untitled")})
+
+@app.route('/api/session', methods=['POST'])
+def create_session():
+    user_email = session.get('user_email')
+    session_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    sessions_collection.insert_one({
+        "user_email": user_email,
+        "session_id": session_id,
+        "title": "New Chat",
+        "messages": [],
+        "created_at": now,
+        "updated_at": now
+    })
+    return jsonify({"session_id": session_id, "title": "New Chat", "messages": []})
+
+@app.route('/api/session/<session_id>/message', methods=['POST'])
+def add_message(session_id):
+    user_email = session.get('user_email')
+    data = request.json
+    message = {"role": data["role"], "content": data["content"], "timestamp": datetime.utcnow()}
+    s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
+    if not s:
+        return jsonify({"error": "Session not found"}), 404
+
+    # Add the message
+    sessions_collection.update_one(
+        {"_id": s["_id"]},
+        {"$push": {"messages": message}}
+    )
+
+    # Re-fetch after update
+    s = sessions_collection.find_one({"_id": s["_id"]})
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+
+    # If this is the first user message, update the title immediately!
+    if len(user_messages) == 1:
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": user_messages[0]["content"]}}
+        )
+
+    # Update updated_at
+    sessions_collection.update_one(
+        {"_id": s["_id"]},
+        {"$set": {"updated_at": message["timestamp"]}}
+    )
+
+    return jsonify({"success": True})
+
+# # Example AI title generation function
+# from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+# from langchain.llms import Ollama
+
+# def generate_session_title(conversation_text):
+#     prompt = (
+#         "Summarize this chat as a short, descriptive session title (max 8 words):\n"
+#         f"{conversation_text}\nTitle:"
+#     )
+#     llm = Ollama(
+#         base_url=OLLAMA_BASE_URL,
+#         model=OLLAMA_MODEL
+#     )
+#     result = llm(prompt)
+#     return result.strip().replace('"', '').replace("Title:", "").strip()
+
 
 # --- Main Execution ---
 if __name__ == '__main__':
