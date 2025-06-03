@@ -55,6 +55,8 @@ body {
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
     overscroll-behavior-y: none;
     line-height: 1.6; /* Improve overall readability */
+    padding-left: 10px !important;
+    padding-right: 10px !important;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -322,58 +324,102 @@ select optgroup { font-style: italic; font-weight: bold; color: var(--bs-info); 
   100% { box-shadow: 0 0 0 0 rgba(var(--bs-danger-rgb), 0); }
 }
 
-/* Responsive Adjustments */
-@media (max-width: 767.98px) {
-    .col-md-4, .col-md-8 { width: 100%; }
-    .card { margin-bottom: 1rem; }
-    .chat-card { height: 65vh; min-height: 350px; }
-    .message { max-width: 92%; }
-    .message-thinking, .message-references { max-width: 92%; }
-    h1 { font-size: 1.6rem; }
-    .status-area { flex-wrap: wrap; }
-    #status-message { width: 100%; margin-left: 0 !important; margin-top: 0.5rem; }
-}
-
-
-/* backend/static/style.css */
-/* ... (existing styles) ... */
-
-/* Mindmap (Mermaid) */
-#mindmap-output-container {
-    width: 100%;
-    min-height: 300px; /* Adjust as needed */
-    border: 1px solid var(--bs-border-color);
-    background-color: var(--card-bg); /* Or a lighter/contrasting bg for the map */
-    border-radius: 5px;
-    display: flex; /* For centering if needed */
-    justify-content: center;
-    align-items: center;
-    overflow: auto; /* Allow scrolling for large maps */
-    padding: 10px;
-}
-
-.mermaid { /* Class used by Mermaid for the SVG container */
-    margin: auto; /* Center the diagram if it's smaller than container */
-}
-
-.mindmap-markdown-source { /* Styling for the raw mermaid code preview */
-    max-height: 100px;
+/* Sidebar styles */
+#right-sidebar {
+    position: fixed;
+    top: 0;
+    right: -40vw;
+    width: 40vw;
+    height: 100vh;
+    background: #23272b;
+    box-shadow: -2px 0 8px rgba(0,0,0,0.2);
+    z-index: 1050;
+    transition: right 0.3s cubic-bezier(.4,0,.2,1);
     overflow-y: auto;
-    font-size: 0.8em;
-    background-color: var(--code-bg);
-    border: 1px solid var(--bs-border-color);
-    padding: 0.5rem;
-    border-radius: 4px;
-    color: var(--code-text-color);
+    padding: 2rem 1.5rem 1.5rem 1.5rem;
+}
+#right-sidebar.open {
+    right: 0;
+}
+#sidebar-toggle-btn {
+    position: fixed;
+    top: 50%;
+    right: 0;
+    z-index: 1100;
+    transform: translateY(-50%);
+    border-radius: 8px 0 0 8px;
+    background: #23272b;
+    color: #fff;
+    border: none;
+    padding: 0.7rem 1rem;
+    box-shadow: -2px 0 8px rgba(0,0,0,0.2);
+}
+@media (max-width: 900px) {
+    #right-sidebar, #right-sidebar.open {
+        width: 100vw;
+        right: -100vw;
+    }
+    #right-sidebar.open {
+        right: 0;
+    }
+    .row.h-100 { flex-direction: column; }
+    .col-auto, .col { width: 100% !important; max-width: 100% !important; }
+    .history-box, .chat-card { height: auto; min-height: 200px; }
 }
 
-/* You might need to adjust Mermaid's default dark theme colors if they clash */
-/* Example: Overriding specific Mermaid dark theme elements if needed
-.mermaid .mindmap-node text { fill: var(--bs-body-color) !important; }
-.mermaid .mindmap-link { stroke: var(--bs-secondary) !important; }
-*/
+/* Compact navbar */
+.navbar {
+    min-height: 40px !important;
+    padding-top: 0.1rem !important;
+    padding-bottom: 0.1rem !important;
+}
+.navbar .navbar-brand, .navbar .btn {
+    padding-top: 0.1rem !important;
+    padding-bottom: 0.1rem !important;
+    font-size: 1rem !important;
+}
 
-/* === MODIFIED: Analysis Reasoning Widget Styles (already present, ensure it's good) === */
-/* ... your existing .reasoning-widget styles ... */
+/* Status area */
+.status-area {
+    min-height: 32px;
+    margin-bottom: 0;
+    padding: 0.5rem 1rem;
+}
 
-/* ... (rest of style.css) ... */
+/* Main container and row fill the viewport minus navbar+status */
+.container-fluid {
+    height: calc(100vh - 73px); /* 40px navbar */
+    min-height: 0;
+    padding: 0 !important;
+}
+.nv {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.row.h-100 {
+    height: calc(100vh - 40px - 32px); /* navbar + status */
+    min-height: 0;
+    flex-wrap: nowrap;
+}
+
+/* History and chat fill available height */
+.history-box, .chat-card {
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+}
+.card-body {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+#chat-history {
+    flex-grow: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
