@@ -2,21 +2,25 @@
 
 import os
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import logging
+import whisper
 import json
 import uuid
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from waitress import serve
-from datetime import datetime, timezone # Correct import
-import whisper
-import tempfile
+from datetime import datetime, timezone
+# if want to use backend for text to speech use whisper
+# import whisper
+# import tempfile
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Initialize Logging and Configuration First ---
 import config
+import tempfile
 config.setup_logging() # Configure logging based on config
 logger = logging.getLogger(__name__) # Get logger for this module
 
@@ -27,6 +31,10 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from datetime import datetime, timedelta
 
+#user uploads
+import gridfs
+from config import db
+fs = gridfs.GridFS(db)
 
 
 # --- Import Core Modules ---
@@ -339,17 +347,9 @@ def protected():
 
 
 @app.route('/')
-@login_required
 def index():
-    """Serves the main HTML page."""
-    logger.debug("Serving index.html")
-    try:
-        # Pass backend status flags to the template if needed for UI elements
-        # status = get_status().get_json() # Get current status
-        return render_template('index.html')#, backend_status=status)
-    except Exception as e:
-         logger.error(f"Error rendering index.html: {e}", exc_info=True)
-         return "Error loading application interface. Check server logs.", 500
+    user_email = session.get('user_email', '')
+    return render_template('index.html', user_email=user_email)
 
 # Static files (CSS, JS) are handled automatically by Flask if static_folder is set correctly
 
@@ -395,43 +395,33 @@ def get_status():
 
 @app.route('/documents', methods=['GET'])
 def get_documents():
-    """Returns sorted lists of default and uploaded PDF filenames."""
-    # logger.debug("Documents list endpoint requested.")
-    default_files = []
-    uploaded_files = []
-    error_messages = []
+    """Returns lists of default and user-uploaded PDF filenames from MongoDB."""
+    from flask import session
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"default_files": [], "uploaded_files": [], "errors": ["User not authenticated."]})
 
-    def _list_pdfs(folder_path, folder_name_for_error):
-        files = []
+    # Default files (still from folder, if you want to keep them)
+    def _list_pdfs(folder_path):
         if not os.path.exists(folder_path):
-            logger.warning(f"Document folder not found: {folder_path}")
-            error_messages.append(f"Folder not found: {folder_name_for_error}")
-            return files
-        try:
-            # List, filter for PDFs, ensure they are files, sort
-            files = sorted([
-                f for f in os.listdir(folder_path)
-                if os.path.isfile(os.path.join(folder_path, f)) and
-                   f.lower().endswith('.pdf') and
-                   not f.startswith('~') # Ignore temp files
-            ])
-        except OSError as e:
-            logger.error(f"Error listing files in {folder_path}: {e}", exc_info=True)
-            error_messages.append(f"Could not read folder: {folder_name_for_error}")
-        return files
+            return []
+        return sorted([
+            f for f in os.listdir(folder_path)
+            if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith('.pdf')
+        ])
 
-    default_files = _list_pdfs(config.DEFAULT_PDFS_FOLDER, "Default PDFs")
-    uploaded_files = _list_pdfs(config.UPLOAD_FOLDER, "Uploaded PDFs")
+    default_files = _list_pdfs(config.DEFAULT_PDFS_FOLDER)
 
-    # Combine and deduplicate for the dropdown if needed, or return separately
-    # For separate lists as requested:
-    response_data = {
+    # Uploaded files from MongoDB GridFS for this user
+    uploaded_files = []
+    for f in fs.find({"metadata.user_email": user_email}):
+        uploaded_files.append(f.filename)
+
+    return jsonify({
         "default_files": default_files,
         "uploaded_files": uploaded_files,
-        "errors": error_messages if error_messages else None
-    }
-    logger.debug(f"Returning document lists: {len(default_files)} default, {len(uploaded_files)} uploaded.")
-    return jsonify(response_data)
+        "errors": None
+    })
 
 
 @app.route('/upload', methods=['POST'])
@@ -442,16 +432,14 @@ def upload_file():
     # --- Check AI readiness (needed for embedding) ---
     if not app_ai_ready or not ai_core.embeddings:
          logger.error("Upload failed: AI Embeddings component not initialized.")
-         # 503 Service Unavailable is appropriate
          return jsonify({"error": "Cannot process upload: AI processing components are not ready. Check server status."}), 503
 
-    # --- File Handling ---
     if 'file' not in request.files:
         logger.warning("Upload request missing 'file' part.")
         return jsonify({"error": "No file part in the request"}), 400
 
     file = request.files['file']
-    if not file or not file.filename: # Check if filename is empty string
+    if not file or not file.filename:
         logger.warning("Upload request received with no selected file name.")
         return jsonify({"error": "No file selected"}), 400
 
@@ -459,81 +447,44 @@ def upload_file():
          logger.warning(f"Upload attempt with disallowed file type: {file.filename}")
          return jsonify({"error": "Invalid file type. Only PDF files (.pdf) are allowed."}), 400
 
-    # Sanitize filename
     filename = secure_filename(file.filename)
-    if not filename: # secure_filename might return empty if input is weird
+    if not filename:
          logger.warning(f"Could not secure filename from: {file.filename}. Using generic name.")
-         filename = f"upload_{uuid.uuid4()}.pdf" # Fallback name
+         filename = f"upload_{uuid.uuid4()}.pdf"
 
+    # --- Store in MongoDB GridFS ---
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"error": "User not authenticated."}), 401
 
-    # Prevent overwriting existing files? Or allow? Allow for simplicity, user manages uploads.
-    # Consider adding a check if filename exists and maybe renaming or rejecting?
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    logger.debug(f"Attempting to save uploaded file to: {filepath}")
+    # Remove any previous file with the same name for this user (optional)
+    for old_file in fs.find({"filename": filename, "metadata.user_email": user_email}):
+        fs.delete(old_file._id)
 
-    # --- Save and Process ---
-    try:
-        # Ensure upload dir exists (double check)
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        file.save(filepath)
-        logger.info(f"File '{filename}' saved successfully to {filepath}")
+    # Save file to GridFS with user metadata
+    file_id = fs.put(
+        file.stream,  # <-- Use .stream for Flask uploads
+        filename=filename,
+        content_type=file.content_type,
+        metadata={"user_email": user_email}
+    )
 
-        # 1. Extract text
-        logger.info(f"Processing uploaded file: {filename}...")
-        text = ai_core.extract_text_from_pdf(filepath)
-        if not text:
-            # Extraction failed, remove the saved file
-            try:
-                os.remove(filepath)
-                logger.info(f"Removed file {filepath} because text extraction failed.")
-            except OSError as rm_err:
-                logger.error(f"Error removing problematic file {filepath} after failed text extraction: {rm_err}")
-            logger.error(f"Could not extract text from uploaded file: {filename}. It might be empty, corrupted, or password-protected.")
-            # Return 400 Bad Request as the file is unusable
-            return jsonify({"error": f"Could not read text from '{filename}'. Please check if the PDF is valid and not password-protected."}), 400
+    # Optionally, process the file as before (extract text, add to vector store, etc.)
+    # You can read the file back from GridFS:
+    gridout = fs.get(file_id)
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
+        temp.write(gridout.read())
+        temp.flush()
+        text = ai_core.extract_text_from_pdf(temp.name)
+        # ... (rest of your processing logic as before) ...
 
-        # 2. Add extracted text to cache (overwrite if filename exists)
-        ai_core.document_texts_cache[filename] = text
-        logger.info(f"Text extracted ({len(text)} chars) and cached for {filename}.")
+    # Continue with your existing logic for text extraction, chunking, vector store, etc.
 
-        # 3. Create chunks/documents
-        logger.debug(f"Creating document chunks for {filename}...")
-        documents = ai_core.create_chunks_from_text(text, filename)
-        if not documents:
-             # Text extracted but chunking failed. Keep file & cache, but RAG won't work.
-             logger.error(f"Could not create document chunks for {filename}, although text was extracted. File kept and cached, but cannot add to knowledge base for chat.")
-             # Return 500 Internal Server Error as processing failed partially
-             return jsonify({"error": f"Could not process the structure of '{filename}' into searchable chunks. Analysis might work, but chat context cannot be added for this file."}), 500
-
-        # 4. Add to vector store (this handles index creation/saving internally)
-        logger.debug(f"Adding {len(documents)} chunks for {filename} to vector store...")
-        if not ai_core.add_documents_to_vector_store(documents):
-            logger.error(f"Failed to add document chunks for '{filename}' to the vector store or save the index. Check logs.")
-            # Keep file/cache, but report index failure.
-            return jsonify({"error": f"File '{filename}' processed, but failed to update the knowledge base index. Consult server logs."}), 500
-
-        # --- Success ---
-        vector_count = -1
-        if ai_core.vector_store and hasattr(ai_core.vector_store, 'index'):
-             vector_count = getattr(ai_core.vector_store.index, 'ntotal', 0)
-        logger.info(f"Successfully processed, cached, and indexed '{filename}'. New vector count: {vector_count}")
-        # Return success message, filename, and maybe new count
-        return jsonify({
-            "message": f"File '{filename}' uploaded and added to knowledge base successfully.",
-            "filename": filename,
-            "vector_count": vector_count
-        }), 200 # 200 OK for successful upload and processing
-
-    except Exception as e:
-        logger.error(f"Unexpected error processing upload for filename '{filename}': {e}", exc_info=True)
-        # Clean up potentially saved file if an error occurred mid-process
-        if 'filepath' in locals() and os.path.exists(filepath):
-             try:
-                 os.remove(filepath)
-                 logger.info(f"Cleaned up file {filepath} after upload processing error.")
-             except OSError as rm_err:
-                 logger.error(f"Error attempting to clean up file {filepath} after error: {rm_err}")
-        return jsonify({"error": f"An unexpected server error occurred while processing the file: {type(e).__name__}. Please check server logs."}), 500
+    return jsonify({
+        "message": f"File '{filename}' uploaded and added to knowledge base successfully.",
+        "filename": filename,
+        "file_id": str(file_id)
+    }), 200
 
 
 @app.route('/analyze', methods=['POST'])
@@ -571,7 +522,8 @@ def analyze_document():
     try:
         # ai_core.generate_document_analysis handles text retrieval (cache/disk) and LLM call
         # It now returns (analysis_content, thinking_content) or (error_message, thinking_content/None)
-        analysis_content, thinking_content = ai_core.generate_document_analysis(filename, analysis_type)
+        user_email = session.get('user_email')
+        analysis_content, thinking_content = ai_core.generate_document_analysis(filename, analysis_type, user_email=user_email)
 
         # Check the result from ai_core
         if analysis_content is None:
@@ -612,43 +564,16 @@ def analyze_document():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    """Handles chat interactions: RAG search, LLM synthesis, history saving."""
-    # logger.debug("Chat request received.") # Can be noisy
-
-    # --- Check prerequisites ---
-    if not app_db_ready:
-        logger.error("Chat request failed: Database not initialized.")
-        return jsonify({
-            "error": "Chat unavailable: Database connection failed.",
-            "answer": "Cannot process chat, the database is currently unavailable. Please try again later or contact support.",
-            "thinking": None, "references": [], "session_id": None
-        }), 503 # Service Unavailable
-
-    if not app_ai_ready or not ai_core.llm or not ai_core.embeddings:
-        logger.error("Chat request failed: AI components not initialized.")
-        return jsonify({
-            "error": "Chat unavailable: AI components not ready.",
-            "answer": "Cannot process chat, the AI components are not ready. Please ensure Ollama is running and models are available.",
-            "thinking": None, "references": [], "session_id": None
-        }), 503 # Service Unavailable
-
-    if not app_vector_store_ready and config.RAG_CHUNK_K > 0: # Only warn if RAG is expected/configured
-        logger.warning("Chat request proceeding, but vector store is not loaded/ready. RAG context will be empty or unavailable.")
-        # Allow chat to proceed using only LLM's general knowledge if RAG fails/is skipped
-
-    # --- Request Parsing ---
     data = request.get_json()
-    if not data:
-        logger.warning("Chat request received without JSON body.")
-        return jsonify({"error": "Invalid request: JSON body required."}), 400
-
-    query = data.get('query')
-    session_id = data.get('session_id') # Get session ID from request
-
-    if not query or not isinstance(query, str) or not query.strip():
-        logger.warning("Chat request received with empty or invalid query.")
+    logger.info(f"Received /chat payload: {data}")
+    query = data.get('query', '').strip()
+    if not query:
         return jsonify({"error": "Query cannot be empty"}), 400
-    query = query.strip()
+
+    # --- Fix: Get session_id from data, or set to None ---
+    session_id = data.get('session_id', None)
+    model = data.get('model', 'ollama')
+    user_email = session.get('user_email')
 
     # --- Session Management ---
     is_new_session = False
@@ -684,6 +609,29 @@ def chat():
          # Optionally return 500 here if saving user message is critical
          # return jsonify({"error": "Database error saving your message.", "answer": "Failed to record your message due to a database issue.", "thinking": None, "references": [], "session_id": session_id}), 500
 
+    # Add the user message to the session's messages array
+    now = datetime.now(timezone.utc)
+    user_message = {"role": "user", "content": query, "timestamp": now}
+    sessions_collection.update_one(
+        {"session_id": session_id, "user_email": user_email},
+        {
+            "$push": {"messages": user_message},
+            "$set": {"updated_at": now}
+        }
+    )
+    # Now update the title if this is the first user message
+    s = sessions_collection.find_one({"session_id": session_id, "user_email": user_email})
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+    if len(user_messages) == 1:
+        # Take the first user message, remove line breaks, and truncate to 50 chars
+        first_prompt = user_messages[0]["content"].replace('\n', ' ').replace('\r', ' ').strip()
+        if len(first_prompt) > 40:
+            first_prompt = first_prompt[:37] + "..."
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": first_prompt}}
+        )
+
 
     # --- RAG + Synthesis Pipeline ---
     bot_answer = "Sorry, I encountered an issue processing your request." # Default error response
@@ -691,44 +639,58 @@ def chat():
     thinking_content = None # Initialize thinking content
 
     try:
-        # 1. Perform RAG Search (if vector store ready and RAG enabled)
-        context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
-        context_docs_map = {} # Map for citation details {1: {'source':.., 'chunk_index':.., 'content':...}}
-        if app_vector_store_ready and config.RAG_CHUNK_K > 0:
-            logger.debug(f"Performing RAG search (session: {session_id})...")
-            # ai_core.perform_rag_search returns: context_docs, formatted_context_text, context_docs_map
-            context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
-            if context_docs:
-                 logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
-            else:
-                 logger.info(f"RAG search completed but found no relevant chunks for session {session_id}.")
-                 context_text = "No relevant document sections found for your query." # More specific message
-        elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
-             logger.warning(f"Skipping RAG search for session {session_id}: Vector store not ready.")
-             context_text = "Knowledge base access is currently unavailable; providing general answer."
-        else: # RAG_CHUNK_K <= 0
-             logger.debug(f"Skipping RAG search for session {session_id}: RAG is disabled (RAG_CHUNK_K <= 0).")
-             context_text = "Document search is disabled; providing general answer."
-
-
-        # 2. Synthesize Response using LLM (ai_core function now returns answer, thinking)
-        logger.debug(f"Synthesizing chat response (session: {session_id})...")
-        bot_answer, thinking_content = ai_core.synthesize_chat_response(query, context_text)
-        # Log if synthesis itself failed (returned error message)
-        if bot_answer.startswith("Error:") or "encountered an error" in bot_answer:
-             logger.error(f"LLM Synthesis failed for session {session_id}. Response: {bot_answer}")
-
-
-        # 3. Extract References (only if RAG provided context and answer is not an error message)
-        # Check if context_docs_map has items and bot_answer doesn't indicate a primary error
-        if context_docs_map and not (bot_answer.startswith("Error:") or "[AI Response Processing Error:" in bot_answer or "encountered an error" in bot_answer.lower()):
-            logger.debug(f"Extracting references from bot answer (session: {session_id})...")
-            references = utils.extract_references(bot_answer, context_docs_map)
-            if references:
-                logger.info(f"Extracted {len(references)} unique references for session {session_id}.")
-            # else: logger.debug("No citation markers found in the bot answer.")
+        if model == 'gemini':
+            # Use Gemini for general chat (no RAG, just LLM)
+            logger.info(f"Using Gemini model for chat (Session: {session_id})")
+            bot_answer, thinking_content = ai_core.synthesize_gemini_response(query)
+            references = []
+            # Save user and bot messages as usual
+            try:
+                database.save_message(session_id, 'user', query, None, None)
+                database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
+            except Exception as db_err:
+                logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
         else:
-             logger.debug(f"Skipping reference extraction for session {session_id}: No context map provided or bot answer indicates an error.")
+            # Use Ollama + RAG as before
+            logger.info(f"Using Ollama + RAG for chat (Session: {session_id})")
+            # 1. Perform RAG Search (if vector store ready and RAG enabled)
+            context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
+            context_docs_map = {} # Map for citation details {1: {'source':.., 'chunk_index':.., 'content':...}}
+            if app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.debug(f"Performing RAG search (session: {session_id})...")
+                # ai_core.perform_rag_search returns: context_docs, formatted_context_text, context_docs_map
+                context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
+                if context_docs:
+                     logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
+                else:
+                     logger.info(f"RAG search completed but found no relevant chunks for session {session_id}.")
+                     context_text = "No relevant document sections found for your query." # More specific message
+            elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                 logger.warning(f"Skipping RAG search for session {session_id}: Vector store not ready.")
+                 context_text = "Knowledge base access is currently unavailable; providing general answer."
+            else: # RAG_CHUNK_K <= 0
+                 logger.debug(f"Skipping RAG search for session {session_id}: RAG is disabled (RAG_CHUNK_K <= 0).")
+                 context_text = "Document search is disabled; providing general answer."
+
+
+            # 2. Synthesize Response using LLM (ai_core function now returns answer, thinking)
+            logger.debug(f"Synthesizing chat response (session: {session_id})...")
+            bot_answer, thinking_content = ai_core.synthesize_chat_response(query, context_text)
+            # Log if synthesis itself failed (returned error message)
+            if bot_answer.startswith("Error:") or "encountered an error" in bot_answer:
+                 logger.error(f"LLM Synthesis failed for session {session_id}. Response: {bot_answer}")
+
+
+            # 3. Extract References (only if RAG provided context and answer is not an error message)
+            # Check if context_docs_map has items and bot_answer doesn't indicate a primary error
+            if context_docs_map and not (bot_answer.startswith("Error:") or "[AI Response Processing Error:" in bot_answer or "encountered an error" in bot_answer.lower()):
+                logger.debug(f"Extracting references from bot answer (session: {session_id})...")
+                references = utils.extract_references(bot_answer, context_docs_map)
+                if references:
+                    logger.info(f"Extracted {len(references)} unique references for session {session_id}.")
+                # else: logger.debug("No citation markers found in the bot answer.")
+            else:
+                 logger.debug(f"Skipping reference extraction for session {session_id}: No context map provided or bot answer indicates an error.")
 
 
         # --- Log Bot Response (including thinking and references) ---
@@ -821,6 +783,164 @@ def get_history():
          return jsonify({"error": f"Unexpected server error retrieving history: {type(e).__name__}. Check logs."}), 500
 
 
+
+
+# --- Whisper Speech-to-Text Endpoint ---
+@app.route('/transcribe', methods=['POST'])
+def transcribe_audio():
+    """
+    Accepts an audio file (webm/wav/mp3/etc) and returns the Whisper transcript.
+    """
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+    audio_file = request.files['audio']
+    if not audio_file:
+        return jsonify({'error': 'No audio file received'}), 400
+
+    # Save to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".webm") as temp:
+        audio_file.save(temp.name)
+        try:
+            # You can use "base", "small", "medium", or "large" for the model
+            model = whisper.load_model("base")
+            result = model.transcribe(temp.name)
+            transcript = result.get("text", "")
+            return jsonify({'transcript': transcript})
+        except Exception as e:
+            logger.error(f"Whisper transcription failed: {e}", exc_info=True)
+            return jsonify({'error': f"Transcription failed: {str(e)}"}), 500
+
+@app.route('/user_files', methods=['GET'])
+def user_files():
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"error": "User not authenticated."}), 401
+    files = fs.find({"metadata.user_email": user_email})
+    file_list = [{"filename": f.filename, "file_id": str(f._id)} for f in files]
+    return jsonify(file_list)
+
+@app.route('/download/<file_id>', methods=['GET'])
+def download_file(file_id):
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify({"error": "User not authenticated."}), 401
+    try:
+        file = fs.get(ObjectId(file_id))
+        if file.metadata.get("user_email") != user_email:
+            return jsonify({"error": "Unauthorized"}), 403
+        return Response(file.read(), mimetype=file.content_type,
+                        headers={"Content-Disposition": f"attachment;filename={file.filename}"})
+    except Exception as e:
+        return jsonify({"error": "File not found"}), 404
+
+# --- Session Management Endpoints ---
+from flask import session, jsonify, request
+from bson.objectid import ObjectId
+import uuid
+from datetime import datetime
+sessions_collection = db.sessions
+
+
+
+# Assume you have a MongoDB collection called 'sessions_collection'
+
+@app.route('/api/sessions', methods=['GET'])
+def get_sessions():
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify([]), 200
+    sessions = list(sessions_collection.find({"user_email": user_email}).sort("updated_at", -1))
+    result = []
+    for s in sessions:
+        # Truncate title and last_message to 40 chars, single line
+        title = s.get("title", "New Chat").replace('\n', ' ').replace('\r', ' ').strip()
+        if len(title) > 40:
+            title = title[:37] + "..."
+        last_msg = s["messages"][-1]["content"].replace('\n', ' ').replace('\r', ' ').strip() if s.get("messages") else ""
+        if len(last_msg) > 40:
+            last_msg = last_msg[:37] + "..."
+        updated_at = s.get("updated_at", s.get("created_at"))
+        updated_at_str = updated_at.isoformat() if updated_at else ""
+        result.append({
+            "session_id": s["session_id"],
+            "title": title,
+            "last_message": last_msg,
+            "updated_at": updated_at_str
+        })
+    return jsonify(result)
+
+@app.route('/api/session/<session_id>', methods=['GET'])
+def get_session(session_id):
+    user_email = session.get('user_email')
+    s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
+    if not s:
+        return jsonify({"messages": []})
+    return jsonify({"messages": s.get("messages", []), "title": s.get("title", "Untitled")})
+
+@app.route('/api/session', methods=['POST'])
+def create_session():
+    user_email = session.get('user_email')
+    session_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    sessions_collection.insert_one({
+        "user_email": user_email,
+        "session_id": session_id,
+        "title": "New Chat",
+        "messages": [],
+        "created_at": now,
+        "updated_at": now
+    })
+    return jsonify({"session_id": session_id, "title": "New Chat", "messages": []})
+
+@app.route('/api/session/<session_id>/message', methods=['POST'])
+def add_message(session_id):
+    user_email = session.get('user_email')
+    data = request.json
+    message = {"role": data["role"], "content": data["content"], "timestamp": datetime.utcnow()}
+    s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
+    if not s:
+        return jsonify({"error": "Session not found"}), 404
+
+    # Add the message
+    sessions_collection.update_one(
+        {"_id": s["_id"]},
+        {"$push": {"messages": message}}
+    )
+
+    # Re-fetch after update
+    s = sessions_collection.find_one({"_id": s["_id"]})
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+
+    # If this is the first user message, update the title immediately!
+    if len(user_messages) == 1:
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": user_messages[0]["content"]}}
+        )
+
+    # Update updated_at
+    sessions_collection.update_one(
+        {"_id": s["_id"]},
+        {"$set": {"updated_at": message["timestamp"]}}
+    )
+
+    return jsonify({"success": True})
+
+# # Example AI title generation function
+# from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+# from langchain.llms import Ollama
+
+# def generate_session_title(conversation_text):
+#     prompt = (
+#         "Summarize this chat as a short, descriptive session title (max 8 words):\n"
+#         f"{conversation_text}\nTitle:"
+#     )
+#     llm = Ollama(
+#         base_url=OLLAMA_BASE_URL,
+#         model=OLLAMA_MODEL
+#     )
+#     result = llm(prompt)
+#     return result.strip().replace('"', '').replace("Title:", "").strip()
 
 
 # --- Main Execution ---

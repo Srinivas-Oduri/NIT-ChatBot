@@ -2,15 +2,15 @@
 flask
 flask-cors
 waitress
-
+flask_dance
 # Configuration & Utilities
 python-dotenv
 uuid # Standard library, but good to note if needed elsewhere
 
 # AI & Machine Learning - Langchain Ecosystem
 langchain
-langchain-community
-langchain-ollama
+langchain_community
+langchain_ollama
 
 # AI & Machine Learning - Core Libraries
 ollama
@@ -41,3 +41,9 @@ httpx
 
 # Optional: For potential Markdown sanitization on frontend (via CDN)
 # No Python package needed, but noted here.
+
+pymongo
+jwt
+pdfplumber
+flask_dance
+whisper
