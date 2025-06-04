@@ -139,7 +139,6 @@ def save_message(session_id: str, sender: str, message_text: str, references: li
         )
         conn.commit()
         logger.info(f"Saved message '{message_id}' for session {session_id} (Sender: {sender})")
-        logger.debug(f"Database save successful for message_id={message_id}, session_id={session_id}")
         return message_id
     except sqlite3.IntegrityError as e:
         # More specific error logging
