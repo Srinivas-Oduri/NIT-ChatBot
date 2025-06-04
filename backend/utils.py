@@ -183,4 +183,17 @@ def escape_html(unsafe_str: str | None) -> str:
                      .replace('"', '&quot;"') \
                      .replace("'",  '&#39;') # Use HTML entity for single quote for better compatibility
 
+def extract_reasoning(answer: str) -> tuple[str, str]:
+    """
+    Splits the answer into main answer and reasoning if 'Reasoning' section is present.
+    Returns (main_answer, reasoning).
+    """
+    match = re.search(r'(.*?)\s*Reasoning\s*[:\-]*\s*(.*)', answer, re.IGNORECASE | re.DOTALL)
+    if match:
+        main_answer = match.group(1).strip()
+        reasoning = match.group(2).strip()
+        return main_answer, reasoning
+    else:
+        return answer.strip(), ""
+
 # --- END OF FILE utils.py ---

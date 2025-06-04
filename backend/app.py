@@ -24,6 +24,24 @@ import tempfile
 config.setup_logging() # Configure logging based on config
 logger = logging.getLogger(__name__) # Get logger for this module
 
+# Import LoadBalancer and define models list for load balancing
+from load_balancer.balancer import LoadBalancer
+
+OLLAMA_MODELS = [
+    "r1-1776:70b",
+    "phi4-reasoning:latest",
+    "qwen2.5vl:32b",
+    "devstral:24b",
+    "qwen3:32b",
+    "llama4:16x17b",
+    "llama4:scout",
+    "deepseek-r1:latest",
+    "qwen2.5:14b-instruct",
+    "deepseek-coder-v2:latest",
+    "llama3.1:latest"
+]
+
+load_balancer = LoadBalancer(OLLAMA_MODELS)
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for
 from config import users_collection, JWT_SECRET
@@ -570,10 +588,11 @@ def chat():
     if not query:
         return jsonify({"error": "Query cannot be empty"}), 400
 
-    # --- Fix: Get session_id from data, or set to None ---
     session_id = data.get('session_id', None)
     model = data.get('model', 'ollama')
     user_email = session.get('user_email')
+
+    selected_model = None  # <-- Add this line
 
     # --- Session Management ---
     is_new_session = False
@@ -640,6 +659,7 @@ def chat():
 
     try:
         if model == 'gemini':
+            selected_model = 'gemini'  # <-- Set here
             # Use Gemini for general chat (no RAG, just LLM)
             logger.info(f"Using Gemini model for chat (Session: {session_id})")
             bot_answer, thinking_content = ai_core.synthesize_gemini_response(query)
@@ -650,8 +670,61 @@ def chat():
                 database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
             except Exception as db_err:
                 logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
+        elif model == 'ollama':
+            logger.info(f"Using LoadBalancer for Ollama+RAG chat (Session: {session_id})")
+            context_text = "No specific document context was retrieved or used for this response."
+            context_docs_map = {}
+            if app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.debug(f"Performing RAG search (session: {session_id})...")
+                context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
+                if context_docs:
+                    logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
+                else:
+                    logger.info(f"RAG search completed but found no relevant chunks.")
+                    context_text = "No relevant document sections found for your query."
+            elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.warning(f"Skipping RAG search: Vector store not ready.")
+                context_text = "Knowledge base access is currently unavailable; providing general answer."
+            else:  # RAG disabled
+                context_text = "Document search is disabled; providing general answer."
+
+            # Compose prompt with optional context
+            full_prompt = (
+                f"{context_text}\n\n"
+                f"User: {query}\n\n"
+                "Please answer the user's question above. After your answer, provide a section titled 'Reasoning' where you explain your thought process step by step."
+            )
+
+            selected_model, bot_answer = load_balancer.get_prediction(full_prompt)
+            if not bot_answer:
+                bot_answer = "Sorry, all models are currently unavailable. Please try again later."
+                references = []
+                thinking_content = None
+            else:
+                # Extract reasoning if present
+                main_answer, reasoning = utils.extract_reasoning(bot_answer)
+                bot_answer = main_answer
+                thinking_content = reasoning
+                references = []
+
+            # Save user and bot messages as usual
+            try:
+                database.save_message(session_id, 'user', query, None, None)
+                database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
+            except Exception as db_err:
+                logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
+
+            response_payload = {
+                "answer": bot_answer,
+                "session_id": session_id,
+                "references": references,
+                "thinking": thinking_content,
+                "model": selected_model  # Add this for transparency
+            }
+            return jsonify(response_payload), 200
         else:
-            # Use Ollama + RAG as before
+            selected_model = model  # <-- Set to whatever model is used in 'else'
+            # Use Ollama + RAG as before for other models or default
             logger.info(f"Using Ollama + RAG for chat (Session: {session_id})")
             # 1. Perform RAG Search (if vector store ready and RAG enabled)
             context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
@@ -710,9 +783,10 @@ def chat():
         # --- Return Response Payload ---
         response_payload = {
             "answer": bot_answer,
-            "session_id": session_id, # Return the (potentially new) session ID
-            "references": references, # Return the structured list of references
-            "thinking": thinking_content # Include the thinking content
+            "session_id": session_id,
+            "references": references,
+            "thinking": thinking_content,
+            "model": selected_model  # Now always defined
         }
         # logger.debug(f"Returning chat response payload for session {session_id}: {response_payload}")
         return jsonify(response_payload), 200 # OK
