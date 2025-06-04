@@ -95,8 +95,15 @@
       <div class="col d-flex flex-column p-0" style="min-width:0;">
         <div class="card bg-dark-subtle border-secondary shadow-sm chat-card flex-grow-1 m-2 d-flex flex-column">
           <div class="card-header d-flex justify-content-between align-items-center">
-            Chat Tutor
-            <small id="session-id-display" class="text-muted small"></small>
+            <span>Chat Tutor</span>
+            <div class="d-flex align-items-center gap-2">
+              <label for="model-select" class="me-1 mb-0 text-light small">Model:</label>
+              <select id="model-select" class="form-select form-select-sm" style="width: 120px;">
+                <option value="ollama">Ollama (RAG)</option>
+                <option value="gemini">Gemini (Chat)</option>
+              </select>
+              <small id="session-id-display" class="text-muted small ms-2"></small>
+            </div>
           </div>
           <div class="card-body d-flex flex-column overflow-hidden p-2 flex-grow-1">
             <div id="chat-history" class="flex-grow-1 overflow-auto mb-2 p-2 border border-secondary rounded bg-dark"></div>
@@ -113,6 +120,8 @@
             </div>
           </div>
         </div>
+       
+        
       </div>
     </div>
   </div>

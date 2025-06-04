@@ -572,44 +572,16 @@ def analyze_document():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    user_email = session.get('user_email')  # <-- ADD THIS LINE
-    """Handles chat interactions: RAG search, LLM synthesis, history saving."""
-    # logger.debug("Chat request received.") # Can be noisy
-
-    # --- Check prerequisites ---
-    if not app_db_ready:
-        logger.error("Chat request failed: Database not initialized.")
-        return jsonify({
-            "error": "Chat unavailable: Database connection failed.",
-            "answer": "Cannot process chat, the database is currently unavailable. Please try again later or contact support.",
-            "thinking": None, "references": [], "session_id": None
-        }), 503 # Service Unavailable
-
-    if not app_ai_ready or not ai_core.llm or not ai_core.embeddings:
-        logger.error("Chat request failed: AI components not initialized.")
-        return jsonify({
-            "error": "Chat unavailable: AI components not ready.",
-            "answer": "Cannot process chat, the AI components are not ready. Please ensure Ollama is running and models are available.",
-            "thinking": None, "references": [], "session_id": None
-        }), 503 # Service Unavailable
-
-    if not app_vector_store_ready and config.RAG_CHUNK_K > 0: # Only warn if RAG is expected/configured
-        logger.warning("Chat request proceeding, but vector store is not loaded/ready. RAG context will be empty or unavailable.")
-        # Allow chat to proceed using only LLM's general knowledge if RAG fails/is skipped
-
-    # --- Request Parsing ---
     data = request.get_json()
-    if not data:
-        logger.warning("Chat request received without JSON body.")
-        return jsonify({"error": "Invalid request: JSON body required."}), 400
-
-    query = data.get('query')
-    session_id = data.get('session_id') # Get session ID from request
-
-    if not query or not isinstance(query, str) or not query.strip():
-        logger.warning("Chat request received with empty or invalid query.")
+    logger.info(f"Received /chat payload: {data}")
+    query = data.get('query', '').strip()
+    if not query:
         return jsonify({"error": "Query cannot be empty"}), 400
-    query = query.strip()
+
+    # --- Fix: Get session_id from data, or set to None ---
+    session_id = data.get('session_id', None)
+    model = data.get('model', 'ollama')
+    user_email = session.get('user_email')
 
     # --- Session Management ---
     is_new_session = False
@@ -675,44 +647,58 @@ def chat():
     thinking_content = None # Initialize thinking content
 
     try:
-        # 1. Perform RAG Search (if vector store ready and RAG enabled)
-        context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
-        context_docs_map = {} # Map for citation details {1: {'source':.., 'chunk_index':.., 'content':...}}
-        if app_vector_store_ready and config.RAG_CHUNK_K > 0:
-            logger.debug(f"Performing RAG search (session: {session_id})...")
-            # ai_core.perform_rag_search returns: context_docs, formatted_context_text, context_docs_map
-            context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
-            if context_docs:
-                 logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
-            else:
-                 logger.info(f"RAG search completed but found no relevant chunks for session {session_id}.")
-                 context_text = "No relevant document sections found for your query." # More specific message
-        elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
-             logger.warning(f"Skipping RAG search for session {session_id}: Vector store not ready.")
-             context_text = "Knowledge base access is currently unavailable; providing general answer."
-        else: # RAG_CHUNK_K <= 0
-             logger.debug(f"Skipping RAG search for session {session_id}: RAG is disabled (RAG_CHUNK_K <= 0).")
-             context_text = "Document search is disabled; providing general answer."
-
-
-        # 2. Synthesize Response using LLM (ai_core function now returns answer, thinking)
-        logger.debug(f"Synthesizing chat response (session: {session_id})...")
-        bot_answer, thinking_content = ai_core.synthesize_chat_response(query, context_text)
-        # Log if synthesis itself failed (returned error message)
-        if bot_answer.startswith("Error:") or "encountered an error" in bot_answer:
-             logger.error(f"LLM Synthesis failed for session {session_id}. Response: {bot_answer}")
-
-
-        # 3. Extract References (only if RAG provided context and answer is not an error message)
-        # Check if context_docs_map has items and bot_answer doesn't indicate a primary error
-        if context_docs_map and not (bot_answer.startswith("Error:") or "[AI Response Processing Error:" in bot_answer or "encountered an error" in bot_answer.lower()):
-            logger.debug(f"Extracting references from bot answer (session: {session_id})...")
-            references = utils.extract_references(bot_answer, context_docs_map)
-            if references:
-                logger.info(f"Extracted {len(references)} unique references for session {session_id}.")
-            # else: logger.debug("No citation markers found in the bot answer.")
+        if model == 'gemini':
+            # Use Gemini for general chat (no RAG, just LLM)
+            logger.info(f"Using Gemini model for chat (Session: {session_id})")
+            bot_answer, thinking_content = ai_core.synthesize_gemini_response(query)
+            references = []
+            # Save user and bot messages as usual
+            try:
+                database.save_message(session_id, 'user', query, None, None)
+                database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
+            except Exception as db_err:
+                logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
         else:
-             logger.debug(f"Skipping reference extraction for session {session_id}: No context map provided or bot answer indicates an error.")
+            # Use Ollama + RAG as before
+            logger.info(f"Using Ollama + RAG for chat (Session: {session_id})")
+            # 1. Perform RAG Search (if vector store ready and RAG enabled)
+            context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
+            context_docs_map = {} # Map for citation details {1: {'source':.., 'chunk_index':.., 'content':...}}
+            if app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.debug(f"Performing RAG search (session: {session_id})...")
+                # ai_core.perform_rag_search returns: context_docs, formatted_context_text, context_docs_map
+                context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
+                if context_docs:
+                     logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
+                else:
+                     logger.info(f"RAG search completed but found no relevant chunks for session {session_id}.")
+                     context_text = "No relevant document sections found for your query." # More specific message
+            elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                 logger.warning(f"Skipping RAG search for session {session_id}: Vector store not ready.")
+                 context_text = "Knowledge base access is currently unavailable; providing general answer."
+            else: # RAG_CHUNK_K <= 0
+                 logger.debug(f"Skipping RAG search for session {session_id}: RAG is disabled (RAG_CHUNK_K <= 0).")
+                 context_text = "Document search is disabled; providing general answer."
+
+
+            # 2. Synthesize Response using LLM (ai_core function now returns answer, thinking)
+            logger.debug(f"Synthesizing chat response (session: {session_id})...")
+            bot_answer, thinking_content = ai_core.synthesize_chat_response(query, context_text)
+            # Log if synthesis itself failed (returned error message)
+            if bot_answer.startswith("Error:") or "encountered an error" in bot_answer:
+                 logger.error(f"LLM Synthesis failed for session {session_id}. Response: {bot_answer}")
+
+
+            # 3. Extract References (only if RAG provided context and answer is not an error message)
+            # Check if context_docs_map has items and bot_answer doesn't indicate a primary error
+            if context_docs_map and not (bot_answer.startswith("Error:") or "[AI Response Processing Error:" in bot_answer or "encountered an error" in bot_answer.lower()):
+                logger.debug(f"Extracting references from bot answer (session: {session_id})...")
+                references = utils.extract_references(bot_answer, context_docs_map)
+                if references:
+                    logger.info(f"Extracted {len(references)} unique references for session {session_id}.")
+                # else: logger.debug("No citation markers found in the bot answer.")
+            else:
+                 logger.debug(f"Skipping reference extraction for session {session_id}: No context map provided or bot answer indicates an error.")
 
 
         # --- Log Bot Response (including thinking and references) ---

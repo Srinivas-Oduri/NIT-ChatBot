@@ -24,6 +24,7 @@ from utils import parse_llm_response, escape_html # Added escape_html for potent
 import pdfplumber
 import gridfs
 import tempfile
+import requests
 
 fs = gridfs.GridFS(db)
 
@@ -779,5 +780,40 @@ def get_document_text(filename, user_email=None):
 
     # 4. Not found
     raise FileNotFoundError(f"Document file '{filename}' not found in default folder or GridFS for user.")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_URL = os.getenv("GEMINI_API_URL", "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent")
+
+def synthesize_gemini_response(query):
+    """
+    Sends the user query to Gemini API and returns the response.
+    """
+    if not GEMINI_API_KEY:
+        return "Gemini API key not configured.", None
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+    params = {
+        "key": GEMINI_API_KEY
+    }
+    data = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": query}
+                ]
+            }
+        ]
+    }
+    try:
+        response = requests.post(GEMINI_API_URL, headers=headers, params=params, json=data, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        # Extract the main answer
+        answer = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        return answer.strip() if answer else "Gemini did not return a response.", None
+    except Exception as e:
+        return f"Error contacting Gemini API: {e}", None
 
 

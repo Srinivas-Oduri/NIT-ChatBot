@@ -731,61 +731,50 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     // ... (rest of script.js)
     // --- END MODIFIED handleAnalysis function ---
-
+    // added for gemini
+    function getSelectedModel() {
+    const sel = document.getElementById('model-select');
+    return sel ? sel.value : 'ollama';
+}
 
     async function handleSendMessage() {
-        if (!chatInput || !sendButton || !sendSpinner || !API_BASE_URL || !backendStatus.ai) return;
         const query = chatInput.value.trim();
-        if (!query) return;
+        if (!query) {
+            alert("Please enter a message before sending.");
+            return;
+        }
+        const model = getSelectedModel ? getSelectedModel() : 'ollama';
+        const payload = {
+            query: query,
+            session_id: sessionId,
+            model: model
+        };
 
+        // 1. Show user message in chat-history
         addMessageToChat('user', query);
-        chatInput.value = '';
-        setChatStatus('AI Tutor is thinking...'); // Use the new function
-        disableChatInput(true);
-        showSpinner(sendSpinner, true);
 
+        chatInput.value = ""; // Clear input
+
+        // 2. Send to backend
         try {
-            const response = await fetch(`${API_BASE_URL}/chat`, {
+            sendButton.disabled = true;
+            showSpinner(sendSpinner, true);
+
+            const res = await fetch('/chat', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: query, session_id: sessionId }),
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
             });
-            const result = await response.json(); // Always try to parse JSON
+            const data = await res.json();
 
-            if (!response.ok) {
-                 const errorDetail = result.error || `Request failed: ${response.status}`;
-                 // Use answer field if provided by backend error, fallback to detail
-                 const displayError = result.answer || `Sorry, error: ${errorDetail}`;
-                 // Pass thinking and references even on error if backend provides them
-                 addMessageToChat('bot', displayError, result.references || [], result.thinking || null);
-                 throw new Error(errorDetail);
-            }
+            // 3. Show bot reply in chat-history
+            addMessageToChat('bot', data.answer, data.references || [], data.thinking || null);
 
-            // Success
-            if (result.session_id && sessionId !== result.session_id) {
-                sessionId = result.session_id;
-                localStorage.setItem('aiTutorSessionId', sessionId);
-                setSessionIdDisplay(sessionId);
-                console.log("Session ID updated:", sessionId);
-            }
-            // Pass all relevant fields to addMessageToChat
-            addMessageToChat('bot', result.answer, result.references || [], result.thinking || null);
-            setChatStatus('Ready'); // Use the new function
-
-        } catch (error) {
-            console.error("Chat error:", error);
-            const errorMsg = error.message || "Unknown network/server error.";
-             // Avoid adding a duplicate error message if already added by !response.ok block
-             const lastBotMessage = chatHistory?.querySelector('.bot-wrapper:last-child .bot-message');
-             if (!lastBotMessage || !lastBotMessage.textContent?.includes("Sorry, error:")) {
-                  addMessageToChat('bot', `Sorry, could not get response: ${errorMsg}`);
-             }
-            setChatStatus(`Error: ${errorMsg.substring(0, 50)}...`, 'danger'); // Use the new function
+        } catch (err) {
+            addMessageToChat('bot', "Error: Could not get response from server.");
         } finally {
-            disableChatInput(!backendStatus.ai); // Re-enable based on AI status
+            sendButton.disabled = false;
             showSpinner(sendSpinner, false);
-            if(backendStatus.ai && chatInput) chatInput.focus();
-            loadSessionHistory(); // <-- Add this line here
         }
     }
 
