@@ -970,6 +970,8 @@ document.addEventListener('DOMContentLoaded', function() {
         voiceBtn.disabled = true;
         voiceBtn.title = "Speech recognition not supported in this browser.";
     }
+
+
 });
 function toIndiaTimeString(utcString) {
     if (!utcString) return '';

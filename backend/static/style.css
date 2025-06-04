@@ -423,3 +423,14 @@ select optgroup { font-style: italic; font-weight: bold; color: var(--bs-info); 
     min-height: 0;
     overflow-y: auto;
 }
+/*PROFILE*/
+.dropdown-item.btn-blue {
+    color: #fff !important;
+    background-color: #0d6efd !important;
+    border-radius: 0.25rem;
+    text-align: center;
+}
+.dropdown-item.btn-blue:hover {
+    background-color: #0b5ed7 !important;
+    color: #fff !important;
+}

@@ -13,7 +13,18 @@
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark py-1">
   <div class="nv">
     <span class="navbar-brand mb-0 h1">Local AI Engineering Tutor</span>
-    <a href="{{ url_for('logout') }}" class="btn btn-success btn-sm">Logout</a>
+    <div class="dropdown">
+  <button class="btn btn-secondary btn-sm rounded-circle d-flex align-items-center justify-content-center"
+          type="button" id="profileDropdown" data-bs-toggle="dropdown" aria-expanded="false"
+          style="width: 36px; height: 36px; font-size: 1.2rem; background-color: #4a5568; border: none;">
+    <span id="profile-initial"></span>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="profileDropdown">
+  <li>
+    <a class="dropdown-item btn-blue" href="{{ url_for('logout') }}">Logout</a>
+  </li>
+</ul>
+</div>
   </div>
 </nav>
 
@@ -146,6 +157,16 @@
               sidebar.classList.remove('open');
           }
       });
+
+      document.addEventListener('DOMContentLoaded', function() {
+    const userEmail = "{{ user_email|default('') }}";
+    console.log("userEmail from Flask:", userEmail);
+    let initial = 'U';
+    if (userEmail && userEmail.length > 0 && userEmail !== 'None') {
+      initial = userEmail.trim()[0].toUpperCase();
+    }
+    document.getElementById('profile-initial').textContent = initial;
+  });
   </script>
   <!-- Custom JS -->
   <script src="{{ url_for('static', filename='script.js') }}"></script>

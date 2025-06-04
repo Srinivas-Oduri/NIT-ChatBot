@@ -347,17 +347,9 @@ def protected():
 
 
 @app.route('/')
-@login_required
 def index():
-    """Serves the main HTML page."""
-    logger.debug("Serving index.html")
-    try:
-        # Pass backend status flags to the template if needed for UI elements
-        # status = get_status().get_json() # Get current status
-        return render_template('index.html')#, backend_status=status)
-    except Exception as e:
-         logger.error(f"Error rendering index.html: {e}", exc_info=True)
-         return "Error loading application interface. Check server logs.", 500
+    user_email = session.get('user_email', '')
+    return render_template('index.html', user_email=user_email)
 
 # Static files (CSS, JS) are handled automatically by Flask if static_folder is set correctly
 
