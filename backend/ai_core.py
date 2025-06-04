@@ -817,3 +817,82 @@ def synthesize_gemini_response(query):
         return f"Error contacting Gemini API: {e}", None
 
 
+
+from bs4 import BeautifulSoup
+
+def synthesize_web_search_response(query: str, num_results=5) -> tuple[str, str | None]:
+    """
+    Performs a Google Custom Search, extracts content from the top links, and summarizes the results.
+    Returns:
+        tuple[str, str | None]: (summary, thinking_content)
+    """
+    api_key = os.environ.get("SEARCH_API_KEY")
+    search_engine_id = os.environ.get("SEARCH_ENGINE_ID")
+
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        'key': api_key,
+        'cx': search_engine_id,
+        'q': query,
+        'num': num_results
+    }
+
+    response = requests.get(url, params=params)
+    # response = requests.get("https://www.googleapis.com/customsearch/v1?key=AIzaSyA8OBU_9Ok-JVPE2UM4LVy1LNjrc1CNWFc&cx=d014807d68db84b3c&q=what+is+air+pollution&num=5")
+    response = query
+    links = []
+    if response.status_code == 200:
+        results = response.json()
+        if "items" in results:
+            for item in results['items']:
+                link = item.get("link")
+                if link:
+                    links.append(link)
+        else:
+            return "No results found.", None
+    else:
+        return f"Error: {response.status_code} {response.text}", None
+    
+    if not links:
+        return "No references found in search results.", None
+
+    return get_summarized_results(links, query)
+
+
+def get_summarized_results(links: list, query: str) -> tuple[str, str | None]:
+    # Scrape and summarize content from each link
+    summaries = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    reference = ""
+    summary = None
+    idx = 0
+
+    for link in links:
+        try:
+            page = requests.get(link, headers=headers, timeout=8)
+            page.raise_for_status()
+            soup = BeautifulSoup(page.text, "html.parser")
+            # Try to get meta description or first two paragraphs
+            meta_desc = soup.find("meta", attrs={"name": "description"})
+            
+            if meta_desc and meta_desc.get("content"):
+                summary = meta_desc["content"]
+                print(summary)
+            else:
+                paragraphs = soup.find_all("p")
+                summary = " ".join([p.get_text(strip=True) for p in paragraphs[:2]])
+            if summary:
+                summaries.append(f"[{idx+1}] {summary.strip()}")
+                reference += f"[{idx+1}] {link}\n"
+                idx += 1
+        except Exception as e:
+            # summaries.append(f"[{idx+1}] Could not retrieve summary from {link} ({type(e).__name__})")
+            print(type(e).__name__, e)
+            pass
+    
+    if not summaries:
+        return "Could not extract useful information from the top web links.", f"Web search performed for: '{query}', but scraping failed."
+
+    answer = "\n\n".join(summaries)
+    thinking_content = f"Web search performed using Google Custom Search for: '{query}'. Top {idx} links scraped and summarized.\n" + reference
+    return answer, thinking_content
