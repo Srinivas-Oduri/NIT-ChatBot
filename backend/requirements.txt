@@ -46,4 +46,4 @@ pymongo
 jwt
 pdfplumber
 flask_dance
-whisper
+openai-whisper
