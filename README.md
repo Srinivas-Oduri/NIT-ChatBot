@@ -96,3 +96,17 @@ MIT License
 ---
 
 **For more details, see the code and inline documentation.**
+
+## 👥 Team Contributions
+
+| 🎓 Teammate Name                   | 🧑‍💻 GitHub Username          | 📌 Major Contribution                                                                 |
+| ---------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------- |
+| Srinivas Oduri                     | `@Srinivas-Oduri`             | Developed user upload functionality with MongoDB and designed load balancing for Ollama models |
+| Bhargav Sai Lingampalli            | `@bhargavsai-lingampalli`     | Integrated advanced web search capabilities, added copy and speech synthesis features for messages |
+| Govardhan Subhash                  | `@Govardhan-subhash`          | Replaced chunk-based rendering with markdown processing; added flowchart and mind map visualization via Mermaid |
+| Yaswanth Srinivas Guptha Sutapalli | `@suthapalliyaswanth`         | Implemented session renaming and deletion functionality                                 |
+| Jagadeesh Sai Kumar Bommidi        | `@JagadeeshSaiKumarBommidi`   | Led Front-End UI/UX design ensuring seamless user experience                           |
+| Deepika Saladi                     | `@DeepikaSaladi2005`          | Implemented persistent chat history functionality                                      |
+| Sree Taraka Vamsi Krishna Jakkani  | `@SreeTarak2`                 | Developed speech-to-text search feature and oversees future project updates            |
+
+
