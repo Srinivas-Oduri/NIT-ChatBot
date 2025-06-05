@@ -413,10 +413,20 @@ document.addEventListener('DOMContentLoaded', () => {
                     speakLink.style.textDecoration = 'underline';
                     speakLink.onclick = function() {
                         const tempElem = document.createElement('div');
-                        tempElem.innerHTML = messageDiv.innerHTML;
+                        tempElem.innerHTML = text;
                         const textToSpeak = tempElem.innerText;
                         const utterance = new SpeechSynthesisUtterance(textToSpeak);
-                        window.speechSynthesis.speak(utterance);
+                        if(!window.speechSynthesis.speaking){
+                            speakLink.textContent = '🔇 Stop';
+                            window.speechSynthesis.speak(utterance);
+                        }
+                        else{
+                            speakLink.textContent = '🔊 Speak';
+                            window.speechSynthesis.cancel();
+                        }
+                        utterance.onend = function() {
+                            speakLink.textContent = '🔊 Speak';
+                        }
                     };
 
                     actionsDiv.appendChild(copyLink);
