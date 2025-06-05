@@ -838,7 +838,6 @@ def synthesize_web_search_response(query: str, num_results=5) -> tuple[str, str 
     }
 
     response = requests.get(url, params=params)
-    # response = requests.get("https://www.googleapis.com/customsearch/v1?key=AIzaSyA8OBU_9Ok-JVPE2UM4LVy1LNjrc1CNWFc&cx=d014807d68db84b3c&q=what+is+air+pollution&num=5")
     links = []
     if response.status_code == 200:
         results = response.json()
@@ -876,13 +875,12 @@ def get_summarized_results(links: list, query: str) -> tuple[str, str | None]:
             
             if meta_desc and meta_desc.get("content"):
                 summary = meta_desc["content"]
-                print(summary)
             else:
                 paragraphs = soup.find_all("p")
                 summary = " ".join([p.get_text(strip=True) for p in paragraphs[:2]])
             if summary:
                 summaries.append(f"[{idx+1}] {summary.strip()}")
-                reference += f"[{idx+1}] {link}\n"
+                reference += f"[{idx+1}] Source: {link}\n"
                 idx += 1
         except Exception as e:
             # summaries.append(f"[{idx+1}] Could not retrieve summary from {link} ({type(e).__name__})")
