@@ -5,13 +5,14 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import logging
+import whisper
 import json
 import uuid
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from waitress import serve
-from datetime import datetime, timezone # Correct import
+from datetime import datetime, timezone
 # if want to use backend for text to speech use whisper
 # import whisper
 # import tempfile
@@ -23,6 +24,24 @@ import tempfile
 config.setup_logging() # Configure logging based on config
 logger = logging.getLogger(__name__) # Get logger for this module
 
+# Import LoadBalancer and define models list for load balancing
+from load_balancer.balancer import LoadBalancer
+
+OLLAMA_MODELS = [
+    "r1-1776:70b",
+    "phi4-reasoning:latest",
+    "qwen2.5vl:32b",
+    "devstral:24b",
+    "qwen3:32b",
+    "llama4:16x17b",
+    "llama4:scout",
+    "deepseek-r1:latest",
+    "qwen2.5:14b-instruct",
+    "deepseek-coder-v2:latest",
+    "llama3.1:latest"
+]
+
+load_balancer = LoadBalancer(OLLAMA_MODELS)
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for
 from config import users_collection, JWT_SECRET
@@ -346,17 +365,9 @@ def protected():
 
 
 @app.route('/')
-@login_required
 def index():
-    """Serves the main HTML page."""
-    logger.debug("Serving index.html")
-    try:
-        # Pass backend status flags to the template if needed for UI elements
-        # status = get_status().get_json() # Get current status
-        return render_template('index.html')#, backend_status=status)
-    except Exception as e:
-         logger.error(f"Error rendering index.html: {e}", exc_info=True)
-         return "Error loading application interface. Check server logs.", 500
+    user_email = session.get('user_email', '')
+    return render_template('index.html', user_email=user_email)
 
 # Static files (CSS, JS) are handled automatically by Flask if static_folder is set correctly
 
@@ -571,43 +582,17 @@ def analyze_document():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    """Handles chat interactions: RAG search, LLM synthesis, history saving."""
-    # logger.debug("Chat request received.") # Can be noisy
-
-    # --- Check prerequisites ---
-    if not app_db_ready:
-        logger.error("Chat request failed: Database not initialized.")
-        return jsonify({
-            "error": "Chat unavailable: Database connection failed.",
-            "answer": "Cannot process chat, the database is currently unavailable. Please try again later or contact support.",
-            "thinking": None, "references": [], "session_id": None
-        }), 503 # Service Unavailable
-
-    if not app_ai_ready or not ai_core.llm or not ai_core.embeddings:
-        logger.error("Chat request failed: AI components not initialized.")
-        return jsonify({
-            "error": "Chat unavailable: AI components not ready.",
-            "answer": "Cannot process chat, the AI components are not ready. Please ensure Ollama is running and models are available.",
-            "thinking": None, "references": [], "session_id": None
-        }), 503 # Service Unavailable
-
-    if not app_vector_store_ready and config.RAG_CHUNK_K > 0: # Only warn if RAG is expected/configured
-        logger.warning("Chat request proceeding, but vector store is not loaded/ready. RAG context will be empty or unavailable.")
-        # Allow chat to proceed using only LLM's general knowledge if RAG fails/is skipped
-
-    # --- Request Parsing ---
     data = request.get_json()
-    if not data:
-        logger.warning("Chat request received without JSON body.")
-        return jsonify({"error": "Invalid request: JSON body required."}), 400
-
-    query = data.get('query')
-    session_id = data.get('session_id') # Get session ID from request
-
-    if not query or not isinstance(query, str) or not query.strip():
-        logger.warning("Chat request received with empty or invalid query.")
+    logger.info(f"Received /chat payload: {data}")
+    query = data.get('query', '').strip()
+    if not query:
         return jsonify({"error": "Query cannot be empty"}), 400
-    query = query.strip()
+
+    session_id = data.get('session_id', None)
+    model = data.get('model', 'ollama')
+    user_email = session.get('user_email')
+
+    selected_model = None  # <-- Add this line
 
     # --- Session Management ---
     is_new_session = False
@@ -643,6 +628,29 @@ def chat():
          # Optionally return 500 here if saving user message is critical
          # return jsonify({"error": "Database error saving your message.", "answer": "Failed to record your message due to a database issue.", "thinking": None, "references": [], "session_id": session_id}), 500
 
+    # Add the user message to the session's messages array
+    now = datetime.now(timezone.utc)
+    user_message = {"role": "user", "content": query, "timestamp": now}
+    sessions_collection.update_one(
+        {"session_id": session_id, "user_email": user_email},
+        {
+            "$push": {"messages": user_message},
+            "$set": {"updated_at": now}
+        }
+    )
+    # Now update the title if this is the first user message
+    s = sessions_collection.find_one({"session_id": session_id, "user_email": user_email})
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+    if len(user_messages) == 1:
+        # Take the first user message, remove line breaks, and truncate to 50 chars
+        first_prompt = user_messages[0]["content"].replace('\n', ' ').replace('\r', ' ').strip()
+        if len(first_prompt) > 40:
+            first_prompt = first_prompt[:37] + "..."
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": first_prompt}}
+        )
+
 
     # --- RAG + Synthesis Pipeline ---
     bot_answer = "Sorry, I encountered an issue processing your request." # Default error response
@@ -650,44 +658,112 @@ def chat():
     thinking_content = None # Initialize thinking content
 
     try:
-        # 1. Perform RAG Search (if vector store ready and RAG enabled)
-        context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
-        context_docs_map = {} # Map for citation details {1: {'source':.., 'chunk_index':.., 'content':...}}
-        if app_vector_store_ready and config.RAG_CHUNK_K > 0:
-            logger.debug(f"Performing RAG search (session: {session_id})...")
-            # ai_core.perform_rag_search returns: context_docs, formatted_context_text, context_docs_map
-            context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
-            if context_docs:
-                 logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
+        if model == 'gemini':
+            selected_model = 'gemini'  # <-- Set here
+            # Use Gemini for general chat (no RAG, just LLM)
+            logger.info(f"Using Gemini model for chat (Session: {session_id})")
+            bot_answer, thinking_content = ai_core.synthesize_gemini_response(query)
+            references = []
+            # Save user and bot messages as usual
+            try:
+                database.save_message(session_id, 'user', query, None, None)
+                database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
+            except Exception as db_err:
+                logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
+        elif model == 'ollama':
+            logger.info(f"Using LoadBalancer for Ollama+RAG chat (Session: {session_id})")
+            context_text = "No specific document context was retrieved or used for this response."
+            context_docs_map = {}
+            if app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.debug(f"Performing RAG search (session: {session_id})...")
+                context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
+                if context_docs:
+                    logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
+                else:
+                    logger.info(f"RAG search completed but found no relevant chunks.")
+                    context_text = "No relevant document sections found for your query."
+            elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.warning(f"Skipping RAG search: Vector store not ready.")
+                context_text = "Knowledge base access is currently unavailable; providing general answer."
+            else:  # RAG disabled
+                context_text = "Document search is disabled; providing general answer."
+
+            # Compose prompt with optional context
+            full_prompt = (
+                f"{context_text}\n\n"
+                f"User: {query}\n\n"
+                "Please answer the user's question above. After your answer, provide a section titled 'Reasoning' where you explain your thought process step by step."
+            )
+
+            selected_model, bot_answer = load_balancer.get_prediction(full_prompt)
+            if not bot_answer:
+                bot_answer = "Sorry, all models are currently unavailable. Please try again later."
+                references = []
+                thinking_content = None
             else:
-                 logger.info(f"RAG search completed but found no relevant chunks for session {session_id}.")
-                 context_text = "No relevant document sections found for your query." # More specific message
-        elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
-             logger.warning(f"Skipping RAG search for session {session_id}: Vector store not ready.")
-             context_text = "Knowledge base access is currently unavailable; providing general answer."
-        else: # RAG_CHUNK_K <= 0
-             logger.debug(f"Skipping RAG search for session {session_id}: RAG is disabled (RAG_CHUNK_K <= 0).")
-             context_text = "Document search is disabled; providing general answer."
+                # Extract reasoning if present
+                main_answer, reasoning = utils.extract_reasoning(bot_answer)
+                bot_answer = main_answer
+                thinking_content = reasoning
+                references = []
 
+            # Save user and bot messages as usual
+            try:
+                database.save_message(session_id, 'user', query, None, None)
+                database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
+            except Exception as db_err:
+                logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
 
-        # 2. Synthesize Response using LLM (ai_core function now returns answer, thinking)
-        logger.debug(f"Synthesizing chat response (session: {session_id})...")
-        bot_answer, thinking_content = ai_core.synthesize_chat_response(query, context_text)
-        # Log if synthesis itself failed (returned error message)
-        if bot_answer.startswith("Error:") or "encountered an error" in bot_answer:
-             logger.error(f"LLM Synthesis failed for session {session_id}. Response: {bot_answer}")
-
-
-        # 3. Extract References (only if RAG provided context and answer is not an error message)
-        # Check if context_docs_map has items and bot_answer doesn't indicate a primary error
-        if context_docs_map and not (bot_answer.startswith("Error:") or "[AI Response Processing Error:" in bot_answer or "encountered an error" in bot_answer.lower()):
-            logger.debug(f"Extracting references from bot answer (session: {session_id})...")
-            references = utils.extract_references(bot_answer, context_docs_map)
-            if references:
-                logger.info(f"Extracted {len(references)} unique references for session {session_id}.")
-            # else: logger.debug("No citation markers found in the bot answer.")
+            response_payload = {
+                "answer": bot_answer,
+                "session_id": session_id,
+                "references": references,
+                "thinking": thinking_content,
+                "model": selected_model  # Add this for transparency
+            }
+            return jsonify(response_payload), 200
         else:
-             logger.debug(f"Skipping reference extraction for session {session_id}: No context map provided or bot answer indicates an error.")
+            selected_model = model  # <-- Set to whatever model is used in 'else'
+            # Use Ollama + RAG as before for other models or default
+            logger.info(f"Using Ollama + RAG for chat (Session: {session_id})")
+            # 1. Perform RAG Search (if vector store ready and RAG enabled)
+            context_text = "No specific document context was retrieved or used for this response." # Default if RAG skipped/failed
+            context_docs_map = {} # Map for citation details {1: {'source':.., 'chunk_index':.., 'content':...}}
+            if app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                logger.debug(f"Performing RAG search (session: {session_id})...")
+                # ai_core.perform_rag_search returns: context_docs, formatted_context_text, context_docs_map
+                context_docs, context_text, context_docs_map = ai_core.perform_rag_search(query)
+                if context_docs:
+                     logger.info(f"RAG search completed. Found {len(context_docs)} unique context chunks for session {session_id}.")
+                else:
+                     logger.info(f"RAG search completed but found no relevant chunks for session {session_id}.")
+                     context_text = "No relevant document sections found for your query." # More specific message
+            elif not app_vector_store_ready and config.RAG_CHUNK_K > 0:
+                 logger.warning(f"Skipping RAG search for session {session_id}: Vector store not ready.")
+                 context_text = "Knowledge base access is currently unavailable; providing general answer."
+            else: # RAG_CHUNK_K <= 0
+                 logger.debug(f"Skipping RAG search for session {session_id}: RAG is disabled (RAG_CHUNK_K <= 0).")
+                 context_text = "Document search is disabled; providing general answer."
+
+
+            # 2. Synthesize Response using LLM (ai_core function now returns answer, thinking)
+            logger.debug(f"Synthesizing chat response (session: {session_id})...")
+            bot_answer, thinking_content = ai_core.synthesize_chat_response(query, context_text)
+            # Log if synthesis itself failed (returned error message)
+            if bot_answer.startswith("Error:") or "encountered an error" in bot_answer:
+                 logger.error(f"LLM Synthesis failed for session {session_id}. Response: {bot_answer}")
+
+
+            # 3. Extract References (only if RAG provided context and answer is not an error message)
+            # Check if context_docs_map has items and bot_answer doesn't indicate a primary error
+            if context_docs_map and not (bot_answer.startswith("Error:") or "[AI Response Processing Error:" in bot_answer or "encountered an error" in bot_answer.lower()):
+                logger.debug(f"Extracting references from bot answer (session: {session_id})...")
+                references = utils.extract_references(bot_answer, context_docs_map)
+                if references:
+                    logger.info(f"Extracted {len(references)} unique references for session {session_id}.")
+                # else: logger.debug("No citation markers found in the bot answer.")
+            else:
+                 logger.debug(f"Skipping reference extraction for session {session_id}: No context map provided or bot answer indicates an error.")
 
 
         # --- Log Bot Response (including thinking and references) ---
@@ -707,9 +783,10 @@ def chat():
         # --- Return Response Payload ---
         response_payload = {
             "answer": bot_answer,
-            "session_id": session_id, # Return the (potentially new) session ID
-            "references": references, # Return the structured list of references
-            "thinking": thinking_content # Include the thinking content
+            "session_id": session_id,
+            "references": references,
+            "thinking": thinking_content,
+            "model": selected_model  # Now always defined
         }
         # logger.debug(f"Returning chat response payload for session {session_id}: {response_payload}")
         return jsonify(response_payload), 200 # OK
@@ -829,6 +906,116 @@ def download_file(file_id):
                         headers={"Content-Disposition": f"attachment;filename={file.filename}"})
     except Exception as e:
         return jsonify({"error": "File not found"}), 404
+
+# --- Session Management Endpoints ---
+from flask import session, jsonify, request
+from bson.objectid import ObjectId
+import uuid
+from datetime import datetime
+sessions_collection = db.sessions
+
+
+
+# Assume you have a MongoDB collection called 'sessions_collection'
+
+@app.route('/api/sessions', methods=['GET'])
+def get_sessions():
+    user_email = session.get('user_email')
+    if not user_email:
+        return jsonify([]), 200
+    sessions = list(sessions_collection.find({"user_email": user_email}).sort("updated_at", -1))
+    result = []
+    for s in sessions:
+        # Truncate title and last_message to 40 chars, single line
+        title = s.get("title", "New Chat").replace('\n', ' ').replace('\r', ' ').strip()
+        if len(title) > 40:
+            title = title[:37] + "..."
+        last_msg = s["messages"][-1]["content"].replace('\n', ' ').replace('\r', ' ').strip() if s.get("messages") else ""
+        if len(last_msg) > 40:
+            last_msg = last_msg[:37] + "..."
+        updated_at = s.get("updated_at", s.get("created_at"))
+        updated_at_str = updated_at.isoformat() if updated_at else ""
+        result.append({
+            "session_id": s["session_id"],
+            "title": title,
+            "last_message": last_msg,
+            "updated_at": updated_at_str
+        })
+    return jsonify(result)
+
+@app.route('/api/session/<session_id>', methods=['GET'])
+def get_session(session_id):
+    user_email = session.get('user_email')
+    s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
+    if not s:
+        return jsonify({"messages": []})
+    return jsonify({"messages": s.get("messages", []), "title": s.get("title", "Untitled")})
+
+@app.route('/api/session', methods=['POST'])
+def create_session():
+    user_email = session.get('user_email')
+    session_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    sessions_collection.insert_one({
+        "user_email": user_email,
+        "session_id": session_id,
+        "title": "New Chat",
+        "messages": [],
+        "created_at": now,
+        "updated_at": now
+    })
+    return jsonify({"session_id": session_id, "title": "New Chat", "messages": []})
+
+@app.route('/api/session/<session_id>/message', methods=['POST'])
+def add_message(session_id):
+    user_email = session.get('user_email')
+    data = request.json
+    message = {"role": data["role"], "content": data["content"], "timestamp": datetime.utcnow()}
+    s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
+    if not s:
+        return jsonify({"error": "Session not found"}), 404
+
+    # Add the message
+    sessions_collection.update_one(
+        {"_id": s["_id"]},
+        {"$push": {"messages": message}}
+    )
+
+    # Re-fetch after update
+    s = sessions_collection.find_one({"_id": s["_id"]})
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+
+    # If this is the first user message, update the title immediately!
+    if len(user_messages) == 1:
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": user_messages[0]["content"]}}
+        )
+
+    # Update updated_at
+    sessions_collection.update_one(
+        {"_id": s["_id"]},
+        {"$set": {"updated_at": message["timestamp"]}}
+    )
+
+    return jsonify({"success": True})
+
+# # Example AI title generation function
+# from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+# from langchain.llms import Ollama
+
+# def generate_session_title(conversation_text):
+#     prompt = (
+#         "Summarize this chat as a short, descriptive session title (max 8 words):\n"
+#         f"{conversation_text}\nTitle:"
+#     )
+#     llm = Ollama(
+#         base_url=OLLAMA_BASE_URL,
+#         model=OLLAMA_MODEL
+#     )
+#     result = llm(prompt)
+#     return result.strip().replace('"', '').replace("Title:", "").strip()
+
 
 # --- Main Execution ---
 if __name__ == '__main__':

@@ -40,7 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusMessageButton = statusMessage?.querySelector('.btn-close'); // Get close button inside
     const connectionStatus = document.getElementById('connection-status');
     const sessionIdDisplay = document.getElementById('session-id-display');
-    // const mindmapOutputContainer = document.getElementById('mindmap-output-container'); 
+    const mindmapOutputContainer = document.getElementById('mindmap-output-container'); 
 
     // --- State ---
     let sessionId = localStorage.getItem('aiTutorSessionId') || null;
@@ -57,8 +57,21 @@ document.addEventListener('DOMContentLoaded', () => {
     let isListening = false;
     let statusCheckTimer = null;
    let statusMessageTimerId = null; // Timer for auto-hiding status messages
+   let currentSessionId = null; // --- MODIFIED: Current session ID for chat history ---
 
     // --- Initialization ---
+    async function createNewSession() {
+    // Call your backend to create a new session
+    const res = await fetch('/api/session', {method: 'POST'});
+    const data = await res.json();
+    // Set the current session ID
+    sessionId = data.session_id;
+    localStorage.setItem('aiTutorSessionId', sessionId);
+    setSessionIdDisplay(sessionId);
+    clearChatHistory();
+    addMessageToChat('bot', "New session started. Ask your first question!");
+    loadSessionHistory(); // <-- ADD THIS LINE
+}
     function initializeApp() {
         console.log("Initializing App...");
         showInitialLoading();
@@ -92,6 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
          }
          // Enable controls now backend is confirmed ready
          updateControlStates();
+         loadSessionHistory(); // <-- Add this line
     }
 
      function onBackendUnavailable(errorMsg = "Backend connection failed.") {
@@ -140,6 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+
     function setupEventListeners() {
         if (uploadButton) uploadButton.addEventListener('click', handleUpload);
         analysisButtons.forEach(button => button?.addEventListener('click', () => handleAnalysis(button.dataset.analysisType)));
@@ -148,6 +163,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (analysisFileSelect) analysisFileSelect.addEventListener('change', handleAnalysisFileSelection); // Keep this listener
         if (uploadInput) uploadInput.addEventListener('change', handleFileInputChange);
         if (statusMessageButton) statusMessageButton.addEventListener('click', () => clearTimeout(statusMessageTimerId)); // Clear timer on manual close
+
+        // --- MODIFIED: Session management button listeners ---
+        document.getElementById('new-session-btn').onclick = createNewSession;
 
         console.log("Event listeners setup.");
     }
@@ -590,7 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // backend/static/script.js
 // ... (near the top, ensure DOM elements are correctly identified) ...
-const mindmapOutputContainer = document.getElementById('mindmap-output-container'); // Duplicate declaration removed
+
 
 // ... (inside DOMContentLoaded) ...
 
@@ -713,60 +731,50 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
     }
     // ... (rest of script.js)
     // --- END MODIFIED handleAnalysis function ---
-
+    // added for gemini
+    function getSelectedModel() {
+    const sel = document.getElementById('model-select');
+    return sel ? sel.value : 'ollama';
+}
 
     async function handleSendMessage() {
-        if (!chatInput || !sendButton || !sendSpinner || !API_BASE_URL || !backendStatus.ai) return;
         const query = chatInput.value.trim();
-        if (!query) return;
+        if (!query) {
+            alert("Please enter a message before sending.");
+            return;
+        }
+        const model = getSelectedModel ? getSelectedModel() : 'ollama';
+        const payload = {
+            query: query,
+            session_id: sessionId,
+            model: model
+        };
 
+        // 1. Show user message in chat-history
         addMessageToChat('user', query);
-        chatInput.value = '';
-        setChatStatus('AI Tutor is thinking...'); // Use the new function
-        disableChatInput(true);
-        showSpinner(sendSpinner, true);
 
+        chatInput.value = ""; // Clear input
+
+        // 2. Send to backend
         try {
-            const response = await fetch(`${API_BASE_URL}/chat`, {
+            sendButton.disabled = true;
+            showSpinner(sendSpinner, true);
+
+            const res = await fetch('/chat', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: query, session_id: sessionId }),
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
             });
-            const result = await response.json(); // Always try to parse JSON
+            const data = await res.json();
 
-            if (!response.ok) {
-                 const errorDetail = result.error || `Request failed: ${response.status}`;
-                 // Use answer field if provided by backend error, fallback to detail
-                 const displayError = result.answer || `Sorry, error: ${errorDetail}`;
-                 // Pass thinking and references even on error if backend provides them
-                 addMessageToChat('bot', displayError, result.references || [], result.thinking || null);
-                 throw new Error(errorDetail);
-            }
+            // 3. Show bot reply in chat-history
+            addMessageToChat('bot', data.answer, data.references || [], data.thinking || null);
 
-            // Success
-            if (result.session_id && sessionId !== result.session_id) {
-                sessionId = result.session_id;
-                localStorage.setItem('aiTutorSessionId', sessionId);
-                setSessionIdDisplay(sessionId);
-                console.log("Session ID updated:", sessionId);
-            }
-            // Pass all relevant fields to addMessageToChat
-            addMessageToChat('bot', result.answer, result.references || [], result.thinking || null);
-            setChatStatus('Ready'); // Use the new function
-
-        } catch (error) {
-            console.error("Chat error:", error);
-            const errorMsg = error.message || "Unknown network/server error.";
-             // Avoid adding a duplicate error message if already added by !response.ok block
-             const lastBotMessage = chatHistory?.querySelector('.bot-wrapper:last-child .bot-message');
-             if (!lastBotMessage || !lastBotMessage.textContent?.includes("Sorry, error:")) {
-                  addMessageToChat('bot', `Sorry, could not get response: ${errorMsg}`);
-             }
-            setChatStatus(`Error: ${errorMsg.substring(0, 50)}...`, 'danger'); // Use the new function
+        } catch (err) {
+            addMessageToChat('bot', "Error: Could not get response from server.");
         } finally {
-            disableChatInput(!backendStatus.ai); // Re-enable based on AI status
+            sendButton.disabled = false;
             showSpinner(sendSpinner, false);
-            if(backendStatus.ai && chatInput) chatInput.focus();
         }
     }
 
@@ -827,6 +835,28 @@ const mindmapOutputContainer = document.getElementById('mindmap-output-container
         }
     }
 
+    async function loadSessionHistory() {
+        const res = await fetch('/api/sessions');
+        const sessions = await res.json();
+        const box = document.getElementById('chat-history-box');
+        box.innerHTML = '';
+        sessions.forEach(s => {
+            const btn = document.createElement('button');
+            btn.className = 'list-group-item list-group-item-action bg-dark text-light mb-1';
+            btn.innerHTML = `<div>
+                <strong>${s.title || 'New Chat'}</strong>
+                <span class="text-muted small float-end">${toIndiaTimeString(s.updated_at)}</span>
+                <div class="small text-secondary">${s.last_message || ''}</div>
+            </div>`;
+            btn.onclick = () => {
+                sessionId = s.session_id;
+                localStorage.setItem('aiTutorSessionId', sessionId);
+                setSessionIdDisplay(sessionId);
+                loadChatHistory(sessionId);
+            };
+            box.appendChild(btn);
+        });
+    }
     // --- Voice Input ---
     
 
@@ -940,4 +970,23 @@ document.addEventListener('DOMContentLoaded', function() {
         voiceBtn.disabled = true;
         voiceBtn.title = "Speech recognition not supported in this browser.";
     }
+
+
 });
+function toIndiaTimeString(utcString) {
+    if (!utcString) return '';
+    // Ensure ISO format with 'Z' for UTC
+    let isoString = utcString;
+    if (!isoString.endsWith('Z')) isoString += 'Z';
+    const indiaTime = new Date(isoString);
+    return indiaTime.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+}
