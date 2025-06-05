@@ -839,7 +839,6 @@ def synthesize_web_search_response(query: str, num_results=5) -> tuple[str, str 
 
     response = requests.get(url, params=params)
     # response = requests.get("https://www.googleapis.com/customsearch/v1?key=AIzaSyA8OBU_9Ok-JVPE2UM4LVy1LNjrc1CNWFc&cx=d014807d68db84b3c&q=what+is+air+pollution&num=5")
-    response = query
     links = []
     if response.status_code == 200:
         results = response.json()
