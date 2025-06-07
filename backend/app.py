@@ -646,6 +646,19 @@ def chat():
                 "model": selected_model  # Add this for transparency
             }
             return jsonify(response_payload), 200
+        elif model == 'websearch':
+            # Use Web Search for general queries (no RAG, just LLM)
+            logger.info(f"Using Web Search model for chat (Session: {session_id})")
+            bot_answer, thinking_content = ai_core.synthesize_web_search_response(query)
+            references = []
+            
+            # Save user and bot messages as usual
+            try:
+                database.save_message(session_id, 'user', query, None, None)
+                database.save_message(session_id, 'bot', bot_answer, references, thinking_content)
+            except Exception as db_err:
+                logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
+
         else:
             selected_model = model  # <-- Set to whatever model is used in 'else'
             # Use Ollama + RAG as before for other models or default

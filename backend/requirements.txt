@@ -47,3 +47,4 @@ jwt
 pdfplumber
 flask_dance
 openai-whisper
+beautifulsoup4

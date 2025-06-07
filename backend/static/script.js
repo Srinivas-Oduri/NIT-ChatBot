@@ -381,6 +381,57 @@ document.addEventListener('DOMContentLoaded', () => {
                     // messageDiv.innerHTML = safeHtml;
                     // For this local setup, we accept the risk for better rendering.
                     messageDiv.innerHTML = marked.parse(text);
+                    // ...inside addMessageToChat, after messageDiv.innerHTML = marked.parse(text); ...
+                    // --- Add Copy and Speak as small inline clickable options ---
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.style.marginTop = "0.25rem";
+                    actionsDiv.style.marginBottom = "0.25rem";
+
+                    const copyLink = document.createElement('span');
+                    copyLink.textContent = '📋 Copy';
+                    copyLink.style.cursor = 'pointer';
+                    copyLink.style.color = '#0d6efd';
+                    copyLink.style.fontSize = '0.95em';
+                    copyLink.style.opacity = '0.85';
+                    copyLink.style.marginRight = '1.5em';
+                    copyLink.style.textDecoration = 'underline';
+                    copyLink.onclick = function() {
+                        const tempElem = document.createElement('div');
+                        tempElem.innerHTML = text;
+                        const textToCopy = tempElem.innerText;
+                        navigator.clipboard.writeText(textToCopy);
+                        copyLink.textContent = '✅ Copied!';
+                        setTimeout(() => copyLink.textContent = '📋 Copy', 1200);
+                    };
+
+                    const speakLink = document.createElement('span');
+                    speakLink.textContent = '🔊 Speak';
+                    speakLink.style.cursor = 'pointer';
+                    speakLink.style.color = '#198754';
+                    speakLink.style.fontSize = '0.95em';
+                    speakLink.style.opacity = '0.85';
+                    speakLink.style.textDecoration = 'underline';
+                    speakLink.onclick = function() {
+                        const tempElem = document.createElement('div');
+                        tempElem.innerHTML = text;
+                        const textToSpeak = tempElem.innerText;
+                        const utterance = new SpeechSynthesisUtterance(textToSpeak);
+                        if(!window.speechSynthesis.speaking){
+                            speakLink.textContent = '🔇 Stop';
+                            window.speechSynthesis.speak(utterance);
+                        }
+                        else{
+                            speakLink.textContent = '🔊 Speak';
+                            window.speechSynthesis.cancel();
+                        }
+                        utterance.onend = function() {
+                            speakLink.textContent = '🔊 Speak';
+                        }
+                    };
+
+                    actionsDiv.appendChild(copyLink);
+                    actionsDiv.appendChild(speakLink);
+                    messageDiv.appendChild(actionsDiv);
                 }
             } catch (e) {
                 console.error("Error rendering Markdown:", e);
