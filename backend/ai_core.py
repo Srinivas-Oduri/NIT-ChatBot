@@ -25,6 +25,8 @@ import pdfplumber
 import gridfs
 import tempfile
 import requests
+from docx import Document
+from pptx import Presentation
 
 fs = gridfs.GridFS(db)
 
@@ -176,167 +178,175 @@ def save_vector_store() -> bool:
 
 
 def load_all_document_texts():
-    """Loads text from all PDFs found in default and upload folders into the global cache.
-
-    Used by the analysis endpoint to avoid re-extraction.
-    """
+    """Loads text from all supported files, embeds it, and adds it to the FAISS vector store."""
     global document_texts_cache
-    logger.info("Loading/refreshing document texts cache for analysis...")
-    document_texts_cache = {} # Reset cache before loading
-    loaded_count = 0
-    processed_files = set()
+    document_texts_cache = {}  # Reset cache
+    supported_extensions = ['.pdf', '.docx', '.pptx', '.txt']
 
     def _load_from_folder(folder_path):
-        nonlocal loaded_count
-        count = 0
         if not os.path.exists(folder_path):
-            logger.warning(f"Document text folder not found: {folder_path}. Skipping.")
-            return count
-        try:
-            for filename in os.listdir(folder_path):
-                if filename.lower().endswith('.pdf') and not filename.startswith('~') and filename not in processed_files:
-                    file_path = os.path.join(folder_path, filename)
-                    # logger.debug(f"Extracting text from {filename} for cache...")
-                    text = extract_text_from_pdf(file_path)
-                    if text:
-                        document_texts_cache[filename] = text
-                        processed_files.add(filename)
-                        count += 1
-                    else:
-                        logger.warning(f"Could not extract text from {filename} in {folder_path} for cache.")
-            logger.info(f"Cached text for {count} PDFs from {folder_path}.")
-            loaded_count += count
-        except Exception as e:
-            logger.error(f"Error listing or processing files in {folder_path} for cache: {e}", exc_info=True)
-        return count
+            logger.warning(f"Folder not found: {folder_path}")
+            return
+        for filename in os.listdir(folder_path):
+            ext = os.path.splitext(filename)[1].lower()
+            file_path = os.path.join(folder_path, filename)
+            try:
+                if ext == '.pdf':
+                    markdown = convert_pdf_to_markdown(file_path)
+                elif ext == '.docx':
+                    markdown = convert_docx_to_markdown(file_path)
+                elif ext == '.pptx':
+                    markdown = convert_pptx_to_markdown(file_path)
+                elif ext == '.txt':
+                    markdown = convert_txt_to_markdown(file_path)
+                else:
+                    continue
 
-    # Load defaults first, then uploads (uploads overwrite defaults if names collide in cache)
-    _load_from_folder(DEFAULT_PDFS_FOLDER)
-    _load_from_folder(UPLOAD_FOLDER)
+                # Embed and add Markdown data to FAISS
+                if markdown:
+                    success = add_markdown_to_vector_store(markdown, filename)
+                    if not success:
+                        logger.error(f"Failed to add embedded Markdown data to vector store for file: {filename}")
+                document_texts_cache[filename] = markdown
+            except Exception as e:
+                logger.error(f"Error processing file {filename}: {e}", exc_info=True)
 
-    logger.info(f"Finished loading texts cache. Total unique documents cached: {len(document_texts_cache)}")
-
+    _load_from_folder(config.DEFAULT_PDFS_FOLDER)
+    _load_from_folder(config.UPLOAD_FOLDER)
+    logger.info(f"Loaded {len(document_texts_cache)} documents into cache.")
 
 # --- PDF Processing Functions ---
 
-def extract_text_from_pdf(pdf_path: str) -> str | None:
-    """Extracts text from a single PDF file using pdfplumber.
+# def extract_text_from_pdf(pdf_path: str) -> str | None:
+#     """Extracts text from a single PDF file and converts it to Markdown."""
+#     text = ""
+#     if not os.path.exists(pdf_path):
+#         logger.error(f"PDF file not found for extraction: {pdf_path}")
+#         return None
+#     try:
+#         with pdfplumber.open(pdf_path) as pdf:
+#             for page in pdf.pages:
+#                 page_text = page.extract_text() or ""
+#                 text += page_text + "\n\n"
+#         return convert_to_markdown(text.strip(), os.path.basename(pdf_path))
+#     except Exception as e:
+#         logger.error(f"Error extracting text from PDF {pdf_path}: {e}", exc_info=True)
+#         return None
 
-    Args:
-        pdf_path (str): The full path to the PDF file.
+# def extract_text_from_docx(docx_path: str) -> str | None:
+#     """Extracts text from a DOCX file and converts it to Markdown."""
+#     try:
+#         doc = Document(docx_path)
+#         text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+#         return convert_to_markdown(text, os.path.basename(docx_path))
+#     except Exception as e:
+#         logger.error(f"Error extracting text from DOCX {docx_path}: {e}", exc_info=True)
+#         return None
 
-    Returns:
-        str | None: The extracted text content, or None if an error occurred.
+# def extract_text_from_pptx(pptx_path: str) -> str | None:
+#     """Extracts text from a PPTX file and converts it to Markdown."""
+#     try:
+#         presentation = Presentation(pptx_path)
+#         text = ""
+#         for slide in presentation.slides:
+#             for shape in slide.shapes:
+#                 if shape.has_text_frame:
+#                     text += shape.text_frame.text + "\n\n"
+#         return convert_to_markdown(text, os.path.basename(pptx_path))
+#     except Exception as e:
+#         logger.error(f"Error extracting text from PPTX {pptx_path}: {e}", exc_info=True)
+#         return None
+
+# def extract_text_from_txt(txt_path: str) -> str | None:
+#     """Extracts text from a TXT file and converts it to Markdown."""
+#     try:
+#         with open(txt_path, 'r', encoding='utf-8') as f:
+#             text = f.read()
+#         return convert_to_markdown(text, os.path.basename(txt_path))
+#     except Exception as e:
+#         logger.error(f"Error extracting text from TXT {txt_path}: {e}", exc_info=True)
+#         return None
+
+# def create_chunks_from_text(text: str, filename: str) -> list[Document]:
+#     """Splits text into chunks using RecursiveCharacterTextSplitter and creates LangChain Documents.
+
+#     Args:
+#         text (str): The text content to chunk.
+#         filename (str): The source filename for metadata.
+
+#     Returns:
+#         list[Document]: A list of LangChain Document objects representing the chunks.
+#     """
+#     if not text:
+#         logger.warning(f"Cannot create chunks for '{filename}', input text is empty.")
+#         return []
+
+#     text_splitter = RecursiveCharacterTextSplitter(
+#         chunk_size=1000,      # Target size of each chunk
+#         chunk_overlap=150,    # Overlap between chunks
+#         length_function=len,
+#         add_start_index=True, # Include start index in metadata
+#         separators=["\n\n", "\n", ". ", ", ", " ", ""], # Hierarchical separators
+#     )
+
+#     try:
+#         # Use create_documents which handles metadata assignment more cleanly
+#         documents = text_splitter.create_documents([text], metadatas=[{"source": filename}])
+#         # Add explicit chunk_index for clarity (though start_index is also present)
+#         for i, doc in enumerate(documents):
+#             doc.metadata["chunk_index"] = i
+
+#         logger.info(f"Created {len(documents)} LangChain Document chunks for '{filename}'.")
+#         return documents
+
+#     except Exception as e:
+#         logger.error(f"Error creating chunks for '{filename}': {e}", exc_info=True)
+#         return []
+
+# def add_documents_to_vector_store(documents: list[Document]) -> bool:
+#     """Adds Markdown documents to the vector store."""
+#     global vector_store, embeddings
+#     if not embeddings:
+#         logger.error("Embeddings not initialized. Cannot add documents to vector store.")
+#         return False
+
+#     try:
+#         if vector_store:
+#             vector_store.add_documents(documents)
+#         else:
+#             vector_store = FAISS.from_documents(documents, embeddings)
+#         return save_vector_store()
+#     except Exception as e:
+#         logger.error(f"Error adding documents to vector store: {e}", exc_info=True)
+#         return False
+
+from langchain.docstore.document import Document
+
+def add_markdown_to_vector_store(markdown_text: str, filename: str) -> bool:
     """
-    text = ""
-    if not os.path.exists(pdf_path):
-        logger.error(f"PDF file not found for extraction: {pdf_path}")
-        return None
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                try:
-                    page_text = page.extract_text() or ""
-                    # Basic cleaning: Replace multiple whitespace chars with single space, keep single newlines.
-                    page_text = re.sub(r'[ \t\f\v]+', ' ', page_text)
-                    page_text = re.sub(r'\n+', '\n', page_text)
-                    if page_text:
-                        text += page_text + "\n\n"
-                except Exception as page_err:
-                    logger.warning(f"Error processing page {page_num+1} of {os.path.basename(pdf_path)}: {page_err}")
-                    continue
-        cleaned_text = text.strip()
-        if cleaned_text:
-            logger.info(f"Successfully extracted text from {os.path.basename(pdf_path)} (approx {len(cleaned_text)} chars).")
-            return cleaned_text
-        else:
-            logger.warning(f"Extracted text was empty for {os.path.basename(pdf_path)}.")
-            return None
-    except Exception as e:
-        logger.error(f"Error extracting text from PDF {os.path.basename(pdf_path)}: {e}", exc_info=True)
-        return None
-
-def create_chunks_from_text(text: str, filename: str) -> list[Document]:
-    """Splits text into chunks using RecursiveCharacterTextSplitter and creates LangChain Documents.
-
+    Adds Markdown data to the FAISS vector store.
     Args:
-        text (str): The text content to chunk.
+        markdown_text (str): The Markdown-formatted text.
         filename (str): The source filename for metadata.
-
     Returns:
-        list[Document]: A list of LangChain Document objects representing the chunks.
-    """
-    if not text:
-        logger.warning(f"Cannot create chunks for '{filename}', input text is empty.")
-        return []
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,      # Target size of each chunk
-        chunk_overlap=150,    # Overlap between chunks
-        length_function=len,
-        add_start_index=True, # Include start index in metadata
-        separators=["\n\n", "\n", ". ", ", ", " ", ""], # Hierarchical separators
-    )
-
-    try:
-        # Use create_documents which handles metadata assignment more cleanly
-        documents = text_splitter.create_documents([text], metadatas=[{"source": filename}])
-        # Add explicit chunk_index for clarity (though start_index is also present)
-        for i, doc in enumerate(documents):
-            doc.metadata["chunk_index"] = i
-
-        logger.info(f"Created {len(documents)} LangChain Document chunks for '{filename}'.")
-        return documents
-
-    except Exception as e:
-        logger.error(f"Error creating chunks for '{filename}': {e}", exc_info=True)
-        return []
-
-def add_documents_to_vector_store(documents: list[Document]) -> bool:
-    """Adds LangChain Documents to the global FAISS index.
-    Creates the index if it doesn't exist. Saves the index afterwards.
-
-    Args:
-        documents (list[Document]): The list of documents to add.
-
-    Returns:
-        bool: True if documents were added and the index saved successfully, False otherwise.
+        bool: True if successful, False otherwise.
     """
     global vector_store, embeddings
-    if not documents:
-        logger.warning("No documents provided to add to vector store.")
-        return True # Nothing to add, technically successful no-op.
     if not embeddings:
         logger.error("Embeddings not initialized. Cannot add documents to vector store.")
         return False
 
     try:
+        # Convert Markdown text into LangChain Document
+        document = Document(page_content=markdown_text, metadata={"source": filename})
         if vector_store:
-            logger.info(f"Adding {len(documents)} document chunks to existing FAISS index...")
-            vector_store.add_documents(documents)
-            index_size = getattr(getattr(vector_store, 'index', None), 'ntotal', 0)
-            logger.info(f"Addition complete. Index now contains {index_size} vectors.")
+            vector_store.add_documents([document])  # Add document to existing vector store
         else:
-            logger.info(f"No FAISS index loaded. Creating new index from {len(documents)} document chunks...")
-            vector_store = FAISS.from_documents(documents, embeddings)
-            index_size = getattr(getattr(vector_store, 'index', None), 'ntotal', 0)
-            if vector_store and index_size > 0:
-                logger.info(f"New FAISS index created with {index_size} vectors.")
-            else:
-                logger.error("Failed to create new FAISS index or index is empty after creation.")
-                vector_store = None # Ensure it's None if creation failed
-                return False
-
-        # IMPORTANT: Persist the updated index
-        return save_vector_store()
-
+            vector_store = FAISS.from_documents([document], embeddings)  # Create new vector store
+        return save_vector_store()  # Save the updated vector store
     except Exception as e:
-        logger.error(f"Error adding documents to FAISS index or saving: {e}", exc_info=True)
-        # Consider state: if vector_store existed before, it might be partially updated in memory.
-        # Saving failed, so on next load, it should revert unless error was in 'from_documents'.
-        return False
-
-# --- RAG and LLM Interaction ---
+        logger.error(f"Error adding Markdown data to vector store: {e}", exc_info=True)
+        return False# --- RAG and LLM Interaction ---
 
 # --- MODIFIED: Added logging ---
 def generate_sub_queries(query: str) -> list[str]:
@@ -390,98 +400,82 @@ def generate_sub_queries(query: str) -> list[str]:
 
 def perform_rag_search(query: str) -> tuple[list[Document], str, dict[int, dict]]:
     """
-    Performs RAG: generates sub-queries, searches vector store, deduplicates, formats context, creates citation map.
+    Performs RAG using Markdown data stored in the FAISS vector store.
+    Args:
+        query (str): The user query.
+    Returns:
+        tuple[list[Document], str, dict[int, dict]]: 
+            - List of retrieved Document objects.
+            - Formatted context text for the LLM prompt.
+            - Citation map for frontend reference.
     """
     global vector_store
-    context_docs = []
-    formatted_context_text = "No relevant context was found in the available documents."
-    context_docs_map = {} # Use 1-based index for keys mapping to doc details
-
     if not vector_store:
         logger.warning("RAG search attempted but no vector store is loaded.")
-        return context_docs, formatted_context_text, context_docs_map
+        return [], "No context available.", {}
+
     if not query or not query.strip():
         logger.warning("RAG search attempted with empty query.")
-        return context_docs, formatted_context_text, context_docs_map
+        return [], "No context available.", {}
 
     index_size = getattr(getattr(vector_store, 'index', None), 'ntotal', 0)
     if index_size == 0:
         logger.warning("RAG search attempted but the vector store index is empty.")
-        return context_docs, formatted_context_text, context_docs_map
+        return [], "No context available.", {}
 
     try:
-        # 1. Generate Sub-Queries
+        # Step 1: Generate Sub-Queries
         search_queries = generate_sub_queries(query)
+        logger.info(f"Generated {len(search_queries)} sub-queries for query: '{query[:100]}...'")
 
-        # 2. Perform Similarity Search for each query
+        # Step 2: Perform Similarity Search for each sub-query
         all_retrieved_docs_with_scores = []
-        # Retrieve k docs per query before deduplication
-        k_per_query = max(RAG_SEARCH_K_PER_QUERY, 1) # Ensure at least 1
-        logger.debug(f"Retrieving top {k_per_query} chunks for each of {len(search_queries)} queries.")
+        for sub_query in search_queries:
+            results_with_scores = vector_store.similarity_search_with_score(sub_query, k=config.RAG_SEARCH_K_PER_QUERY)
+            all_retrieved_docs_with_scores.extend(results_with_scores)
 
-        for q_idx, q in enumerate(search_queries):
-            try:
-                # Use similarity_search_with_score to get scores for potential ranking/filtering later
-                retrieved = vector_store.similarity_search_with_score(q, k=k_per_query)
-                # Format: [(Document(page_content=..., metadata=...), score), ...]
-                all_retrieved_docs_with_scores.extend(retrieved)
-                logger.debug(f"Query {q_idx+1}/{len(search_queries)} ('{q[:50]}...') retrieved {len(retrieved)} chunks.")
-            except Exception as search_err:
-                logger.error(f"Error during similarity search for query '{q[:50]}...': {search_err}", exc_info=False) # Less verbose log
-
-        if not all_retrieved_docs_with_scores:
-            logger.info("No relevant chunks found in vector store for the query/sub-queries.")
-            return context_docs, formatted_context_text, context_docs_map
-
-        # 3. Deduplicate and Select Top Documents
-        # Key: (source_filename, chunk_index) Value: (Document, score)
+        # Step 3: Deduplicate and Sort Documents by Score
         unique_docs_dict = {}
         for doc, score in all_retrieved_docs_with_scores:
-            source = doc.metadata.get('source', 'Unknown')
-            # Use chunk_index if available, otherwise maybe start_index or hash of content? Chunk_index preferred.
-            chunk_idx = doc.metadata.get('chunk_index', doc.metadata.get('start_index', -1))
-            doc_key = (source, chunk_idx)
+            source = doc.metadata.get('source', 'Unknown Source')
+            content_hash = hash(doc.page_content)
+            doc_key = (source, content_hash)
 
-            # Consider content-based deduplication if metadata isn't reliable enough
-            # content_hash = hash(doc.page_content)
-            # doc_key = (source, content_hash)
-
-            if doc_key not in unique_docs_dict or score < unique_docs_dict[doc_key][1]: # Lower score (distance) is better
+            # Keep the document with the best score (lowest distance)
+            if doc_key not in unique_docs_dict or score < unique_docs_dict[doc_key][1]:
                 unique_docs_dict[doc_key] = (doc, score)
 
         # Sort unique documents by score (ascending - best first)
         sorted_unique_docs = sorted(unique_docs_dict.values(), key=lambda item: item[1])
 
         # Select the final top RAG_CHUNK_K unique documents
-        final_context_docs_with_scores = sorted_unique_docs[:RAG_CHUNK_K]
+        final_context_docs_with_scores = sorted_unique_docs[:config.RAG_CHUNK_K]
         context_docs = [doc for doc, score in final_context_docs_with_scores]
 
         logger.info(f"Retrieved {len(all_retrieved_docs_with_scores)} chunks total across sub-queries. "
-                    f"Selected {len(context_docs)} unique chunks (target k={RAG_CHUNK_K}) for context.")
+                    f"Selected {len(context_docs)} unique chunks (target k={config.RAG_CHUNK_K}) for context.")
 
-        # 4. Format Context for LLM Prompt and Create Citation Map
+        # Step 4: Format Context for LLM Prompt and Create Citation Map
         formatted_context_parts = []
-        temp_map = {} # Use 1-based index for map keys, matching citations like [1], [2]
+        context_docs_map = {}  # Use 1-based index for map keys, matching citations like [1], [2]
         for i, doc in enumerate(context_docs):
-            citation_index = i + 1 # 1-based index for the prompt and map
+            citation_index = i + 1  # 1-based index for the prompt and map
             source = doc.metadata.get('source', 'Unknown Source')
             chunk_idx = doc.metadata.get('chunk_index', 'N/A')
             content = doc.page_content
 
             # Format for the LLM prompt
-            # Use 'Source' and 'Chunk Index' for clarity in the context block
             context_str = f"[{citation_index}] Source: {source} | Chunk Index: {chunk_idx}\n{content}"
             formatted_context_parts.append(context_str)
 
             # Store data needed for frontend reference display, keyed by the citation number
-            temp_map[citation_index] = {
+            context_docs_map[citation_index] = {
                 "source": source,
-                "chunk_index": chunk_idx, # Keep original chunk index if available
-                "content": content # Store full content for reference expansion/preview later
+                "chunk_index": chunk_idx,
+                "content": content
             }
 
         formatted_context_text = "\n\n---\n\n".join(formatted_context_parts) if formatted_context_parts else "No context chunks selected after processing."
-        context_docs_map = temp_map # Assign the populated map
 
     except Exception as e:
         logger.error(f"Error during RAG search process for query '{query[:50]}...': {e}", exc_info=True)
@@ -492,7 +486,6 @@ def perform_rag_search(query: str) -> tuple[list[Document], str, dict[int, dict]
 
     # Return the list of Document objects, the formatted text for the LLM, and the citation map
     return context_docs, formatted_context_text, context_docs_map
-
 # --- MODIFIED: Added logging ---
 def synthesize_chat_response(query: str, context_text: str) -> tuple[str, str | None]:
     """
@@ -766,17 +759,20 @@ def get_document_text(filename, user_email=None):
     if user_email:
         file_obj = fs.find_one({"filename": filename, "metadata.user_email": user_email})
         if file_obj:
-            with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
                 temp.write(file_obj.read())
                 temp.flush()
-                text = extract_text_from_pdf(temp.name)
-                document_texts_cache[filename] = text
-                # After text = extract_text_from_pdf(temp.name)
-                if text:
-                    logger.info(f"Successfully extracted text from GridFS PDF '{filename}' for user '{user_email}'.")
-                else:
-                    logger.error(f"Failed to extract text from GridFS PDF '{filename}' for user '{user_email}'.")
-                return text
+                temp.close()  # Explicitly close the file to release locks
+                try:
+                    text = extract_text_from_pdf(temp.name)
+                    document_texts_cache[filename] = text
+                    if text:
+                        logger.info(f"Successfully extracted text from GridFS PDF '{filename}' for user '{user_email}'.")
+                    else:
+                        logger.error(f"Failed to extract text from GridFS PDF '{filename}' for user '{user_email}'.")
+                    return text
+                finally:
+                    os.remove(temp.name)  # Clean up the temporary file
 
     # 4. Not found
     raise FileNotFoundError(f"Document file '{filename}' not found in default folder or GridFS for user.")
@@ -816,6 +812,74 @@ def synthesize_gemini_response(query):
     except Exception as e:
         return f"Error contacting Gemini API: {e}", None
 
+def convert_to_markdown(text: str, filename: str) -> str:
+    """
+    Converts plain text into Markdown format for RAG.
+    Args:
+        text (str): The extracted text content.
+        filename (str): The source filename for metadata.
+    Returns:
+        str: Markdown-formatted text.
+    """
+    markdown = f"# {filename}\n\n{text.strip()}"
+    return markdown
+
+def convert_pdf_to_markdown(pdf_path: str) -> str:
+    """Extracts text from a PDF file and converts it to Markdown."""
+    text = ""
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text() or ""
+                text += page_text + "\n\n"
+        markdown = f"# {os.path.basename(pdf_path)}\n\n{text.strip()}"
+        return markdown
+    except Exception as e:
+        raise RuntimeError(f"Error extracting text from PDF {pdf_path}: {e}")
+
+def convert_docx_to_markdown(docx_path: str) -> str:
+    """Extracts text from a DOCX file and converts it to Markdown."""
+    if not os.path.exists(docx_path):
+        raise FileNotFoundError(f"DOCX file not found: {docx_path}")
+    try:
+        doc = Document(docx_path)
+        text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        markdown = f"# {os.path.basename(docx_path)}\n\n{text.strip()}"
+        return markdown
+    except Exception as e:
+        raise RuntimeError(f"Error extracting text from DOCX {docx_path}: {e}")
+
+from pptx import Presentation
+
+def convert_pptx_to_markdown(pptx_path: str) -> str:
+    """Extracts text from a PPTX file and converts it to Markdown."""
+    if not os.path.exists(pptx_path):
+        raise FileNotFoundError(f"PPTX file not found: {pptx_path}")
+    try:
+        presentation = Presentation(pptx_path)
+        text = ""
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    text += shape.text_frame.text + "\n\n"
+        markdown = f"# {os.path.basename(pptx_path)}\n\n{text.strip()}"
+        return markdown
+    except Exception as e:
+        raise RuntimeError(f"Error extracting text from PPTX {pptx_path}: {e}")
+def convert_txt_to_markdown(txt_path: str) -> str:
+    """Reads a TXT file and converts it to Markdown."""
+    if not os.path.exists(txt_path):
+        raise FileNotFoundError(f"TXT file not found: {txt_path}")
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        markdown = f"# {os.path.basename(txt_path)}\n\n{text.strip()}"
+        return markdown
+    except Exception as e:
+        raise RuntimeError(f"Error reading TXT file {txt_path}: {e}")
+from markdownify import markdownify as md
 
 
 from bs4 import BeautifulSoup
@@ -893,3 +957,8 @@ def get_summarized_results(links: list, query: str) -> tuple[str, str | None]:
     answer = "\n\n".join(summaries)
     thinking_content = f"Web search performed using Google Custom Search for: '{query}'. Top {idx} links scraped and summarized.\n" + reference
     return answer, thinking_content
+
+def convert_html_to_markdown(html_content: str, filename: str) -> str:
+    """Converts HTML content into Markdown."""
+    markdown = md(html_content)
+    return f"# {filename}\n\n{markdown.strip()}"

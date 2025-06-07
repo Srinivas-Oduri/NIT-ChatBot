@@ -5,7 +5,7 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import logging
-import whisper
+# import whisper
 import json
 import uuid
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
@@ -15,7 +15,7 @@ from waitress import serve
 from datetime import datetime, timezone
 # if want to use backend for text to speech use whisper
 # import whisper
-# import tempfile
+import tempfile
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Initialize Logging and Configuration First ---
@@ -442,15 +442,18 @@ def get_documents():
     })
 
 
+import tempfile
+import os
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Handles PDF uploads, processing, caching, and adding to FAISS."""
+    """Handles file uploads, processing, caching, and adding to FAISS."""
     logger.info("File upload request received.")
 
-    # --- Check AI readiness (needed for embedding) ---
+    # --- Check AI readiness ---
     if not app_ai_ready or not ai_core.embeddings:
-         logger.error("Upload failed: AI Embeddings component not initialized.")
-         return jsonify({"error": "Cannot process upload: AI processing components are not ready. Check server status."}), 503
+        logger.error("Upload failed: AI Embeddings component not initialized.")
+        return jsonify({"error": "Cannot process upload: AI processing components are not ready. Check server status."}), 503
 
     if 'file' not in request.files:
         logger.warning("Upload request missing 'file' part.")
@@ -462,124 +465,45 @@ def upload_file():
         return jsonify({"error": "No file selected"}), 400
 
     if not utils.allowed_file(file.filename):
-         logger.warning(f"Upload attempt with disallowed file type: {file.filename}")
-         return jsonify({"error": "Invalid file type. Only PDF files (.pdf) are allowed."}), 400
+        logger.warning(f"Upload attempt with disallowed file type: {file.filename}")
+        return jsonify({"error": "Invalid file type. Supported types are: PDF, DOCX, PPTX, TXT."}), 400
 
     filename = secure_filename(file.filename)
     if not filename:
-         logger.warning(f"Could not secure filename from: {file.filename}. Using generic name.")
-         filename = f"upload_{uuid.uuid4()}.pdf"
+        logger.warning(f"Could not secure filename from: {file.filename}. Using generic name.")
+        filename = f"upload_{uuid.uuid4()}.pdf"
 
-    # --- Store in MongoDB GridFS ---
-    user_email = session.get('user_email')
-    if not user_email:
-        return jsonify({"error": "User not authenticated."}), 401
+    # --- Process the file ---
+    ext = os.path.splitext(filename)[1].lower()
+    markdown_text = None
+    try:
+        if ext == '.pdf':
+            markdown_text = ai_core.convert_pdf_to_markdown(file.stream)
+        elif ext == '.docx':
+            markdown_text = ai_core.convert_docx_to_markdown(file.stream)
+        elif ext == '.pptx':
+            markdown_text = ai_core.convert_pptx_to_markdown(file.stream)
+        elif ext == '.txt':
+            markdown_text = ai_core.convert_txt_to_markdown(file.stream)
+        else:
+            logger.warning(f"Unsupported file type for Markdown conversion: {ext}")
+            return jsonify({"error": "Unsupported file type for processing."}), 400
+    except Exception as e:
+        logger.error(f"Error processing file {filename}: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to process file: {str(e)}"}), 500
 
-    # Remove any previous file with the same name for this user (optional)
-    for old_file in fs.find({"filename": filename, "metadata.user_email": user_email}):
-        fs.delete(old_file._id)
-
-    # Save file to GridFS with user metadata
-    file_id = fs.put(
-        file.stream,  # <-- Use .stream for Flask uploads
-        filename=filename,
-        content_type=file.content_type,
-        metadata={"user_email": user_email}
-    )
-
-    # Optionally, process the file as before (extract text, add to vector store, etc.)
-    # You can read the file back from GridFS:
-    gridout = fs.get(file_id)
-    with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
-        temp.write(gridout.read())
-        temp.flush()
-        text = ai_core.extract_text_from_pdf(temp.name)
-        # ... (rest of your processing logic as before) ...
-
-    # Continue with your existing logic for text extraction, chunking, vector store, etc.
+    # Add Markdown data to FAISS vector store
+    if markdown_text:
+        success = ai_core.add_markdown_to_vector_store(markdown_text, filename)
+        if not success:
+            logger.error(f"Failed to add Markdown data to vector store for file: {filename}")
+            return jsonify({"error": "Failed to add file to knowledge base."}), 500
 
     return jsonify({
         "message": f"File '{filename}' uploaded and added to knowledge base successfully.",
-        "filename": filename,
-        "file_id": str(file_id)
+        "filename": filename
     }), 200
-
-
-@app.route('/analyze', methods=['POST'])
-def analyze_document():
-    """Generates analysis (FAQ, Topics, Mindmap) for a selected document."""
-    # --- Check AI readiness ---
-    if not app_ai_ready or not ai_core.llm:
-         logger.error("Analysis request failed: LLM component not initialized.")
-         return jsonify({"error": "Analysis unavailable: AI model is not ready.", "thinking": None}), 503
-
-    # --- Request Parsing ---
-    data = request.get_json()
-    if not data:
-        logger.warning("Analysis request received without JSON body.")
-        return jsonify({"error": "Invalid request: JSON body required.", "thinking": None}), 400
-
-    filename = data.get('filename')
-    analysis_type = data.get('analysis_type')
-    logger.info(f"Analysis request received: type='{analysis_type}', file='{filename}'")
-
-    # Validate filename (basic check)
-    if not filename or not isinstance(filename, str) or not filename.strip() or '/' in filename or '\\' in filename:
-        logger.warning(f"Invalid filename received for analysis: {filename}")
-        return jsonify({"error": "Missing or invalid 'filename'.", "thinking": None}), 400
-    # Use the sanitized/validated filename
-    # No need to call secure_filename here, assume it came from the /documents list
-    filename = filename.strip()
-
-    allowed_types = list(config.ANALYSIS_PROMPTS.keys()) # Get allowed types from config
-    if not analysis_type or analysis_type not in allowed_types:
-        logger.warning(f"Invalid analysis_type received: {analysis_type}")
-        return jsonify({"error": f"Invalid 'analysis_type'. Must be one of: {', '.join(allowed_types)}", "thinking": None}), 400
-
-    # --- Perform Analysis using ai_core function ---
-    try:
-        # ai_core.generate_document_analysis handles text retrieval (cache/disk) and LLM call
-        # It now returns (analysis_content, thinking_content) or (error_message, thinking_content/None)
-        user_email = session.get('user_email')
-        analysis_content, thinking_content = ai_core.generate_document_analysis(filename, analysis_type, user_email=user_email)
-
-        # Check the result from ai_core
-        if analysis_content is None:
-             # This implies a failure to get the document text (e.g., file not found)
-             # generate_document_analysis should have logged the specific error
-             # Return a 404 Not Found if the error message indicates that
-             error_msg = f"Analysis failed: Could not retrieve or process document '{filename}'."
-             status_code = 404 # Assume file not found or unreadable if content is None
-             logger.error(error_msg)
-             return jsonify({"error": error_msg, "thinking": thinking_content}), status_code
-
-        elif analysis_content.startswith("Error:"):
-            # The analysis function itself indicated an error (e.g., LLM failure, bad prompt)
-            error_message = analysis_content # Use the error message returned
-            status_code = 500 # Assume internal server error unless message suggests otherwise (e.g., 404)
-            if "not found" in error_message.lower():
-                 status_code = 404
-            elif "AI model failed" in error_message or "AI model is not available" in error_message:
-                 status_code = 503 # Service unavailable
-
-            logger.error(f"Analysis failed for '{filename}' ({analysis_type}): {error_message}")
-            # Return thinking content even if analysis failed, if it was generated
-            return jsonify({"error": error_message, "thinking": thinking_content}), status_code
-        else:
-            # Success - we have valid analysis content
-            logger.info(f"Analysis successful for '{filename}' ({analysis_type}). Content length: {len(analysis_content)}")
-            # Return both content and thinking
-            return jsonify({
-                "content": analysis_content,
-                "thinking": thinking_content # Include thinking content in success response
-            })
-
-    except Exception as e:
-        # Catch unexpected errors in the route handler itself
-        logger.error(f"Unexpected error in /analyze route for '{filename}' ({analysis_type}): {e}", exc_info=True)
-        return jsonify({"error": f"Unexpected server error during analysis: {type(e).__name__}. Check logs.", "thinking": None}), 500
-
-
+    
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.get_json()
@@ -655,7 +579,7 @@ def chat():
     # --- RAG + Synthesis Pipeline ---
     bot_answer = "Sorry, I encountered an issue processing your request." # Default error response
     references = []
-    thinking_content = None # Initialize thinking content
+    thinking_content = None  # Initialize thinking content
 
     try:
         if model == 'gemini':
@@ -802,7 +726,7 @@ def chat():
             "model": selected_model  # Now always defined
         }
         # logger.debug(f"Returning chat response payload for session {session_id}: {response_payload}")
-        return jsonify(response_payload), 200 # OK
+        return jsonify(response_payload), 200  # OK
 
     except Exception as e:
         # Catch unexpected errors during the RAG/Synthesis pipeline
@@ -821,12 +745,65 @@ def chat():
         return jsonify({
             "error": "Unexpected server error.",
             "answer": error_message,
-            "session_id": session_id, # Return session ID even on error
-            "thinking": f"Error in /chat: {type(e).__name__}", # Simplified error thinking
+            "session_id": session_id,  # Return session ID even on error
+            "thinking": f"Error in /chat: {type(e).__name__}",  # Simplified error thinking
             "references": []
         }), 500
 
 
+@app.route('/analyze', methods=['POST'])
+def analyze_document():
+    """Generates analysis (FAQ, Topics, Mindmap) for a selected document."""
+    # --- Check AI readiness ---
+    if not app_ai_ready or not ai_core.llm:
+        logger.error("Analysis request failed: LLM component not initialized.")
+        return jsonify({"error": "Analysis unavailable: AI model is not ready.", "thinking": None}), 503
+
+    # --- Request Parsing ---
+    data = request.get_json()
+    if not data:
+        logger.warning("Analysis request received without JSON body.")
+        return jsonify({"error": "Invalid request: JSON body required.", "thinking": None}), 400
+
+    filename = data.get('filename')
+    analysis_type = data.get('analysis_type')
+    logger.info(f"Analysis request received: type='{analysis_type}', file='{filename}'")
+
+    # Validate filename
+    if not filename or not isinstance(filename, str) or not filename.strip():
+        logger.warning(f"Invalid filename received for analysis: {filename}")
+        return jsonify({"error": "Missing or invalid 'filename'.", "thinking": None}), 400
+
+    allowed_types = list(config.ANALYSIS_PROMPTS.keys())
+    if not analysis_type or analysis_type not in allowed_types:
+        logger.warning(f"Invalid analysis_type received: {analysis_type}")
+        return jsonify({"error": f"Invalid 'analysis_type'. Must be one of: {', '.join(allowed_types)}", "thinking": None}), 400
+
+    # --- Perform Analysis using ai_core function ---
+    try:
+        user_email = session.get('user_email')
+        analysis_content, thinking_content = ai_core.generate_document_analysis(filename, analysis_type, user_email=user_email)
+
+        if analysis_content is None:
+            error_msg = f"Analysis failed: Could not retrieve or process document '{filename}'."
+            logger.error(error_msg)
+            return jsonify({"error": error_msg, "thinking": thinking_content}), 404
+
+        elif analysis_content.startswith("Error:"):
+            error_message = analysis_content
+            logger.error(f"Analysis failed for '{filename}' ({analysis_type}): {error_message}")
+            return jsonify({"error": error_message, "thinking": thinking_content}), 500
+
+        else:
+            logger.info(f"Analysis successful for '{filename}' ({analysis_type}). Content length: {len(analysis_content)}")
+            return jsonify({
+                "content": analysis_content,
+                "thinking": thinking_content
+            })
+
+    except Exception as e:
+        logger.error(f"Unexpected error in /analyze route for '{filename}' ({analysis_type}): {e}", exc_info=True)
+        return jsonify({"error": f"Unexpected server error during analysis: {type(e).__name__}. Check logs.", "thinking": None}), 500
 @app.route('/history', methods=['GET'])
 def get_history():
     """Retrieves chat history for a given session ID."""
@@ -872,30 +849,30 @@ def get_history():
 
 
 
-# --- Whisper Speech-to-Text Endpoint ---
-@app.route('/transcribe', methods=['POST'])
-def transcribe_audio():
-    """
-    Accepts an audio file (webm/wav/mp3/etc) and returns the Whisper transcript.
-    """
-    if 'audio' not in request.files:
-        return jsonify({'error': 'No audio file provided'}), 400
-    audio_file = request.files['audio']
-    if not audio_file:
-        return jsonify({'error': 'No audio file received'}), 400
+# # --- Whisper Speech-to-Text Endpoint ---
+# @app.route('/transcribe', methods=['POST'])
+# def transcribe_audio():
+#     """
+#     Accepts an audio file (webm/wav/mp3/etc) and returns the Whisper transcript.
+#     """
+#     if 'audio' not in request.files:
+#         return jsonify({'error': 'No audio file provided'}), 400
+#     audio_file = request.files['audio']
+#     if not audio_file:
+#         return jsonify({'error': 'No audio file received'}), 400
 
-    # Save to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".webm") as temp:
-        audio_file.save(temp.name)
-        try:
-            # You can use "base", "small", "medium", or "large" for the model
-            model = whisper.load_model("base")
-            result = model.transcribe(temp.name)
-            transcript = result.get("text", "")
-            return jsonify({'transcript': transcript})
-        except Exception as e:
-            logger.error(f"Whisper transcription failed: {e}", exc_info=True)
-            return jsonify({'error': f"Transcription failed: {str(e)}"}), 500
+#     # Save to a temporary file
+#     with tempfile.NamedTemporaryFile(suffix=".webm") as temp:
+#         audio_file.save(temp.name)
+#         try:
+#             # You can use "base", "small", "medium", or "large" for the model
+#             model = whisper.load_model("base")
+#             result = model.transcribe(temp.name)
+#             transcript = result.get("text", "")
+#             return jsonify({'transcript': transcript})
+#         except Exception as e:
+#             logger.error(f"Whisper transcription failed: {e}", exc_info=True)
+#             return jsonify({'error': f"Transcription failed: {str(e)}"}), 500
 
 @app.route('/user_files', methods=['GET'])
 def user_files():
