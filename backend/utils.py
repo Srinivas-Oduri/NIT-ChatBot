@@ -198,4 +198,17 @@ def extract_reasoning(answer: str) -> tuple[str, str]:
     else:
         return answer.strip(), ""
 
+def extract_answer_and_reasoning(text):
+    import re
+    if not isinstance(text, str):
+        return "", ""
+    match = re.search(r"Answer\s*:\s*(.*?)\s*Reasoning\s*:\s*(.*)", text, re.DOTALL | re.IGNORECASE)
+    if match:
+        answer = match.group(1).strip()
+        reasoning = match.group(2).strip()
+    else:
+        answer = text.strip()
+        reasoning = ""
+    return answer, reasoning
+
 # --- END OF FILE utils.py ---
