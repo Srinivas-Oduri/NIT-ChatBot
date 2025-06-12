@@ -12,7 +12,9 @@ def allowed_file(filename):
     """Checks if the uploaded file extension is allowed."""
     if not filename:
         return False
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    ext = filename.rsplit('.', 1)[1].lower()
+    logger.debug(f"Checking extension: '{ext}'")
+    return '.' in filename and ext in ALLOWED_EXTENSIONS
 
 def parse_llm_response(full_response: str | None) -> tuple[str, str | None]:
     """

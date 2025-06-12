@@ -571,7 +571,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!uploadInput || !uploadStatus || !uploadButton || !uploadSpinner || !API_BASE_URL || !backendStatus.ai) return;
         const file = uploadInput.files[0];
         if (!file) { setElementStatus(uploadStatus, "Select a PDF first.", 'warning'); return; }
-        if (!file.name.toLowerCase().endsWith(".pdf")) { setElementStatus(uploadStatus, "Invalid file: PDF only.", 'warning'); return; }
+        const allowedExtensions = [".pdf", ".docx", ".pptx", ".txt"];
+        const fileExt = file.name.toLowerCase().slice(file.name.lastIndexOf("."));
+        if (!allowedExtensions.includes(fileExt)) {
+            setElementStatus(uploadStatus, "Invalid file: Only PDF, DOCX, PPTX, TXT allowed.", 'warning');
+            return;
+        }
 
         setElementStatus(uploadStatus, `Uploading ${escapeHtml(file.name)}...`);
         uploadButton.disabled = true;

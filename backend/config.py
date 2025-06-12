@@ -48,7 +48,8 @@ DATABASE_PATH = os.path.join(backend_dir, DATABASE_NAME)
 DEFAULT_PDFS_FOLDER = os.path.join(backend_dir, os.getenv('DEFAULT_PDFS_FOLDER', 'default_pdfs'))
 
 # File Handling
-ALLOWED_EXTENSIONS = {'pdf'}
+# config.py
+ALLOWED_EXTENSIONS = {'pdf', 'docx', 'pptx', 'txt'}
 
 # RAG Configuration
 RAG_CHUNK_K = int(os.getenv('RAG_CHUNK_K', 5)) # Number of unique chunks to finally send to LLM

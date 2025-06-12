@@ -25,7 +25,7 @@ import pdfplumber
 import gridfs
 import tempfile
 import requests
-from docx import Document
+import docx
 from pptx import Presentation
 
 fs = gridfs.GridFS(db)
@@ -217,55 +217,55 @@ def load_all_document_texts():
 
 # --- PDF Processing Functions ---
 
-# def extract_text_from_pdf(pdf_path: str) -> str | None:
-#     """Extracts text from a single PDF file and converts it to Markdown."""
-#     text = ""
-#     if not os.path.exists(pdf_path):
-#         logger.error(f"PDF file not found for extraction: {pdf_path}")
-#         return None
-#     try:
-#         with pdfplumber.open(pdf_path) as pdf:
-#             for page in pdf.pages:
-#                 page_text = page.extract_text() or ""
-#                 text += page_text + "\n\n"
-#         return convert_to_markdown(text.strip(), os.path.basename(pdf_path))
-#     except Exception as e:
-#         logger.error(f"Error extracting text from PDF {pdf_path}: {e}", exc_info=True)
-#         return None
+def extract_text_from_pdf(pdf_path: str) -> str | None:
+    """Extracts text from a single PDF file and converts it to Markdown."""
+    text = ""
+    if not os.path.exists(pdf_path):
+        logger.error(f"PDF file not found for extraction: {pdf_path}")
+        return None
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text() or ""
+                text += page_text + "\n\n"
+        return convert_to_markdown(text.strip(), os.path.basename(pdf_path))
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF {pdf_path}: {e}", exc_info=True)
+        return None
 
-# def extract_text_from_docx(docx_path: str) -> str | None:
-#     """Extracts text from a DOCX file and converts it to Markdown."""
-#     try:
-#         doc = Document(docx_path)
-#         text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-#         return convert_to_markdown(text, os.path.basename(docx_path))
-#     except Exception as e:
-#         logger.error(f"Error extracting text from DOCX {docx_path}: {e}", exc_info=True)
-#         return None
+def extract_text_from_docx(docx_path: str) -> str | None:
+    """Extracts text from a DOCX file and converts it to Markdown."""
+    try:
+        doc = docx.Document(docx_path)
+        text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        return convert_to_markdown(text, os.path.basename(docx_path))
+    except Exception as e:
+        logger.error(f"Error extracting text from DOCX {docx_path}: {e}", exc_info=True)
+        return None
 
-# def extract_text_from_pptx(pptx_path: str) -> str | None:
-#     """Extracts text from a PPTX file and converts it to Markdown."""
-#     try:
-#         presentation = Presentation(pptx_path)
-#         text = ""
-#         for slide in presentation.slides:
-#             for shape in slide.shapes:
-#                 if shape.has_text_frame:
-#                     text += shape.text_frame.text + "\n\n"
-#         return convert_to_markdown(text, os.path.basename(pptx_path))
-#     except Exception as e:
-#         logger.error(f"Error extracting text from PPTX {pptx_path}: {e}", exc_info=True)
-#         return None
+def extract_text_from_pptx(pptx_path: str) -> str | None:
+    """Extracts text from a PPTX file and converts it to Markdown."""
+    try:
+        presentation = Presentation(pptx_path)
+        text = ""
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    text += shape.text_frame.text + "\n\n"
+        return convert_to_markdown(text, os.path.basename(pptx_path))
+    except Exception as e:
+        logger.error(f"Error extracting text from PPTX {pptx_path}: {e}", exc_info=True)
+        return None
 
-# def extract_text_from_txt(txt_path: str) -> str | None:
-#     """Extracts text from a TXT file and converts it to Markdown."""
-#     try:
-#         with open(txt_path, 'r', encoding='utf-8') as f:
-#             text = f.read()
-#         return convert_to_markdown(text, os.path.basename(txt_path))
-#     except Exception as e:
-#         logger.error(f"Error extracting text from TXT {txt_path}: {e}", exc_info=True)
-#         return None
+def extract_text_from_txt(txt_path: str) -> str | None:
+    """Extracts text from a TXT file and converts it to Markdown."""
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        return convert_to_markdown(text, os.path.basename(txt_path))
+    except Exception as e:
+        logger.error(f"Error extracting text from TXT {txt_path}: {e}", exc_info=True)
+        return None
 
 # def create_chunks_from_text(text: str, filename: str) -> list[Document]:
 #     """Splits text into chunks using RecursiveCharacterTextSplitter and creates LangChain Documents.
@@ -324,7 +324,7 @@ from langchain.docstore.document import Document
 
 def add_markdown_to_vector_store(markdown_text: str, filename: str) -> bool:
     """
-    Adds Markdown data to the FAISS vector store.
+    Embeds Markdown data and adds it to the FAISS vector store.
     Args:
         markdown_text (str): The Markdown-formatted text.
         filename (str): The source filename for metadata.
@@ -337,16 +337,22 @@ def add_markdown_to_vector_store(markdown_text: str, filename: str) -> bool:
         return False
 
     try:
-        # Convert Markdown text into LangChain Document
+        # Create a LangChain Document
         document = Document(page_content=markdown_text, metadata={"source": filename})
+
+        # Add the Document to the FAISS vector store (FAISS will handle embedding)
         if vector_store:
-            vector_store.add_documents([document])  # Add document to existing vector store
+            vector_store.add_documents([document])
         else:
-            vector_store = FAISS.from_documents([document], embeddings)  # Create new vector store
-        return save_vector_store()  # Save the updated vector store
+            vector_store = FAISS.from_documents([document], embeddings)
+
+        # Save the updated vector store
+        return save_vector_store()
     except Exception as e:
-        logger.error(f"Error adding Markdown data to vector store: {e}", exc_info=True)
-        return False# --- RAG and LLM Interaction ---
+        logger.error(f"Error adding embedded Markdown data to vector store: {e}", exc_info=True)
+        return False
+
+# --- RAG and LLM Interaction ---
 
 # --- MODIFIED: Added logging ---
 def generate_sub_queries(query: str) -> list[str]:
@@ -750,8 +756,18 @@ def get_document_text(filename, user_email=None):
 
     # 2. Try to load from default folder
     default_path = os.path.join(config.DEFAULT_PDFS_FOLDER, filename)
+    ext = os.path.splitext(filename)[1].lower()
     if os.path.exists(default_path):
-        text = extract_text_from_pdf(default_path)
+        if ext == ".pdf":
+            text = extract_text_from_pdf(default_path)
+        elif ext == ".docx":
+            text = extract_text_from_docx(default_path)
+        elif ext == ".pptx":
+            text = extract_text_from_pptx(default_path)
+        elif ext == ".txt":
+            text = extract_text_from_txt(default_path)
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
         document_texts_cache[filename] = text
         return text
 
@@ -759,17 +775,26 @@ def get_document_text(filename, user_email=None):
     if user_email:
         file_obj = fs.find_one({"filename": filename, "metadata.user_email": user_email})
         if file_obj:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp:
                 temp.write(file_obj.read())
                 temp.flush()
                 temp.close()  # Explicitly close the file to release locks
                 try:
-                    text = extract_text_from_pdf(temp.name)
+                    if ext == ".pdf":
+                        text = extract_text_from_pdf(temp.name)
+                    elif ext == ".docx":
+                        text = extract_text_from_docx(temp.name)
+                    elif ext == ".pptx":
+                        text = extract_text_from_pptx(temp.name)
+                    elif ext == ".txt":
+                        text = extract_text_from_txt(temp.name)
+                    else:
+                        raise ValueError(f"Unsupported file type: {ext}")
                     document_texts_cache[filename] = text
                     if text:
-                        logger.info(f"Successfully extracted text from GridFS PDF '{filename}' for user '{user_email}'.")
+                        logger.info(f"Successfully extracted text from GridFS '{filename}' for user '{user_email}'.")
                     else:
-                        logger.error(f"Failed to extract text from GridFS PDF '{filename}' for user '{user_email}'.")
+                        logger.error(f"Failed to extract text from GridFS '{filename}' for user '{user_email}'.")
                     return text
                 finally:
                     os.remove(temp.name)  # Clean up the temporary file
@@ -844,7 +869,7 @@ def convert_docx_to_markdown(docx_path: str) -> str:
     if not os.path.exists(docx_path):
         raise FileNotFoundError(f"DOCX file not found: {docx_path}")
     try:
-        doc = Document(docx_path)
+        doc = docx.Document(docx_path)
         text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
         markdown = f"# {os.path.basename(docx_path)}\n\n{text.strip()}"
         return markdown
