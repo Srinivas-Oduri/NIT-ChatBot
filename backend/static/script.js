@@ -990,3 +990,14 @@ function toIndiaTimeString(utcString) {
         hour12: false
     });
 }
+
+// Example rendering function
+function renderBotReply(answer, reasoning) {
+  const chatBox = document.getElementById('chat-box');
+  chatBox.innerHTML += `
+    <div class="bot-message message">
+      ${answer}
+      ${reasoning ? `<div class="reasoning-box"><b>Reasoning:</b> ${reasoning}</div>` : ''}
+    </div>
+  `;
+}

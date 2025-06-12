@@ -434,3 +434,12 @@ select optgroup { font-style: italic; font-weight: bold; color: var(--bs-info); 
     background-color: #0b5ed7 !important;
     color: #fff !important;
 }
+.reasoning-box {
+  background: #23263a;
+  color: #b3b3b3;
+  border-radius: 0.4em;
+  padding: 0.7em 1em;
+  margin-top: 0.5em;
+  font-size: 0.97em;
+  font-family: monospace;
+}

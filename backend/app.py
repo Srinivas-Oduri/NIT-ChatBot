@@ -20,6 +20,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Initialize Logging and Configuration First ---
 import config
+import utils
 import tempfile
 config.setup_logging() # Configure logging based on config
 logger = logging.getLogger(__name__) # Get logger for this module
@@ -640,6 +641,10 @@ def chat():
     )
     # Now update the title if this is the first user message
     s = sessions_collection.find_one({"session_id": session_id, "user_email": user_email})
+    if not s:
+        logger.error(f"Session not found for session_id={session_id}, user_email={user_email}")
+        return jsonify({"error": "Session not found."}), 404
+
     user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
     if len(user_messages) == 1:
         # Take the first user message, remove line breaks, and truncate to 50 chars
@@ -692,10 +697,20 @@ def chat():
             full_prompt = (
                 f"{context_text}\n\n"
                 f"User: {query}\n\n"
-                "Please answer the user's question above. After your answer, provide a section titled 'Reasoning' where you explain your thought process step by step."
+                "Please answer the user's question above as clearly and informatively as possible. "
+                "Include definitions, examples, and any related information that might help understanding. "
+                "After your answer, provide a section titled 'Reasoning' where you explain how you arrived at your answer, referencing context or general knowledge as appropriate. "
+                "Format your response as:\n"
+                "Answer: <your detailed answer here>\n"
+                "Reasoning: <your reasoning here>"
             )
 
             selected_model, bot_answer = load_balancer.get_prediction(full_prompt)
+            if not isinstance(bot_answer, str):
+                logger.error(f"Model did not return a string. Got: {type(bot_answer)} - {bot_answer}")
+                return jsonify({"error": "AI model failed to generate a response."}), 500
+
+            answer, reasoning = utils.extract_answer_and_reasoning(bot_answer)
             if not bot_answer:
                 bot_answer = "Sorry, all models are currently unavailable. Please try again later."
                 references = []
@@ -715,11 +730,11 @@ def chat():
                 logger.error(f"Database error while saving messages for session {session_id}: {db_err}", exc_info=True)
 
             response_payload = {
-                "answer": bot_answer,
+                "answer": answer,
+                "reasoning": reasoning,
                 "session_id": session_id,
                 "references": references,
-                "thinking": thinking_content,
-                "model": selected_model  # Add this for transparency
+                "model": selected_model
             }
             return jsonify(response_payload), 200
         else:
@@ -948,7 +963,18 @@ def get_session(session_id):
     user_email = session.get('user_email')
     s = sessions_collection.find_one({"user_email": user_email, "session_id": session_id})
     if not s:
-        return jsonify({"messages": []})
+        logger.error(f"Session not found for session_id={session_id}, user_email={user_email}")
+        return jsonify({"error": "Session not found."}), 404
+
+    user_messages = [m for m in s.get("messages", []) if m["role"] == "user"]
+
+    # If this is the first user message, update the title immediately!
+    if len(user_messages) == 1:
+        sessions_collection.update_one(
+            {"_id": s["_id"]},
+            {"$set": {"title": user_messages[0]["content"]}}
+        )
+
     return jsonify({"messages": s.get("messages", []), "title": s.get("title", "Untitled")})
 
 @app.route('/api/session', methods=['POST'])
