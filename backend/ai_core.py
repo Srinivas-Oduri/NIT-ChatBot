@@ -676,24 +676,6 @@ def generate_document_analysis(filename: str, analysis_type: str, user_email=Non
         return f"Error generating analysis: AI model failed ({type(e).__name__}). Check logs for details.", None
 # --- END MODIFICATION ---
 
-def clean_mermaid_code(llm_output: str) -> str:
-    """
-    Extracts and cleans Mermaid mindmap code from LLM output.
-    Removes code block markers and extra text.
-    """
-    code = llm_output.strip()
-    # Remove triple backticks and language hints
-    if code.startswith("```"):
-        code = code.lstrip("`")
-        # Remove the first line (which may be 'mermaid')
-        code = "\n".join(code.splitlines()[1:])
-    if code.endswith("```"):
-        code = code.rstrip("`")
-    # Extract only the mindmap block if there is extra text
-    if "mindmap" in code:
-        code = code[code.index("mindmap"):]
-    return code.strip()
-
 def clean_mermaid_flowchart(llm_output: str) -> str:
     """Clean and sanitize Mermaid flowchart (graph TD) output from LLM."""
     lines = llm_output.strip().splitlines()
@@ -910,3 +892,32 @@ def convert_html_to_markdown(html_content: str, filename: str) -> str:
     """Converts HTML content into Markdown."""
     markdown = md(html_content)
     return f"# {filename}\n\n{markdown.strip()}"
+def clean_mermaid_code(llm_output: str) -> str:
+    """
+    Extracts and cleans Mermaid mindmap code from LLM output.
+    Removes code block markers and extra text.
+    """
+    code = llm_output.strip()
+    # Remove triple backticks and language hints
+    if code.startswith("```"):
+        code = code.lstrip("`")
+        # Remove the first line (which may be 'mermaid')
+        code = "\n".join(code.splitlines()[1:])
+    if code.endswith("```"):
+        code = code.rstrip("`")
+    # Extract only the mindmap block if there is extra text
+    if "mindmap" in code:
+        code = code[code.index("mindmap"):]
+    # Remove or truncate lines that are too long or have invalid characters
+    cleaned_lines = []
+    for line in code.splitlines():
+        # Truncate node labels to 40 chars, remove problematic chars
+        if "[" in line and "]" in line:
+            parts = line.split("[")
+            label = "[".join(parts[1:]).split("]")[0]
+            label = label.replace("-", " ").replace("(", "").replace(")", "")
+            if len(label) > 40:
+                label = label[:37] + "..."
+            line = parts[0] + "[" + label + "]"
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
