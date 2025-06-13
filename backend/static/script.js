@@ -1006,3 +1006,50 @@ function renderBotReply(answer, reasoning) {
     </div>
   `;
 }
+
+// Sidebar menu logic
+document.getElementById('menu-upload').onclick = function() {
+    document.getElementById('section-upload').style.display = 'block';
+    document.getElementById('section-documents').style.display = 'none';
+    document.getElementById('section-analysis').style.display = 'none';
+};
+document.getElementById('menu-documents').onclick = function() {
+    document.getElementById('section-upload').style.display = 'none';
+    document.getElementById('section-documents').style.display = 'block';
+    document.getElementById('section-analysis').style.display = 'none';
+    // Optionally, load your documents list here
+    loadDocumentsList(); // Load documents when this section is opened
+};
+document.getElementById('menu-analysis').onclick = function() {
+    document.getElementById('section-upload').style.display = 'none';
+    document.getElementById('section-documents').style.display = 'none';
+    document.getElementById('section-analysis').style.display = 'block';
+   // <-- Add this line
+};
+
+async function loadDocumentsList() {
+    const documentsListDiv = document.getElementById('documents-list');
+    documentsListDiv.textContent = "Loading...";
+    try {
+        const response = await fetch('/documents');
+        const data = await response.json();
+        if (data.default_files.length === 0 && data.uploaded_files.length === 0) {
+            documentsListDiv.innerHTML = "<span class='text-muted'>No documents found.</span>";
+            return;
+        }
+        let html = '';
+        if (data.default_files.length > 0) {
+            html += "<strong>Default Documents:</strong><ul>";
+            data.default_files.forEach(f => html += `<li>${f}</li>`);
+            html += "</ul>";
+        }
+        if (data.uploaded_files.length > 0) {
+            html += "<strong>Uploaded Documents:</strong><ul>";
+            data.uploaded_files.forEach(f => html += `<li>${f}</li>`);
+            html += "</ul>";
+        }
+        documentsListDiv.innerHTML = html;
+    } catch (e) {
+        documentsListDiv.innerHTML = "<span class='text-danger'>Failed to load documents.</span>";
+    }
+}
